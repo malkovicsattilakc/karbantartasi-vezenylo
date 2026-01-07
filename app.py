@@ -5,6 +5,25 @@ import folium
 from streamlit_folium import st_folium
 from datetime import date
 
+# --- Ellenőrző rész ---
+SCOPE = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+try:
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPE
+    )
+    gc = gspread.authorize(creds)
+
+    # Próbáljuk meg megnyitni a Sheet-et
+    sh = gc.open("Terkep_Adatbazis")
+    st.success("🎉 A Google Sheet elérhető! A kapcsolat működik.")
+except Exception as e:
+    st.error(f"⚠️ Hiba a Sheet elérésében: {e}")
+
 # ---------- GOOGLE AUTH ----------
 SCOPE = [
     "https://www.googleapis.com/auth/spreadsheets",
