@@ -5,149 +5,155 @@ import folium
 from streamlit_folium import st_folium
 from datetime import date, datetime
 
-# ---------- CONFIG & AUTH ----------
+# ---------- KONFIGURÁCIÓ ----------
 st.set_page_config(layout="wide", page_title="Karbantartási Vezénylő")
 
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
-# Biztonságos betöltés
+# ---------- ADATBÁZIS CSATLAKOZÁS ----------
 @st.cache_resource
 def get_gc():
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPE)
-    return gspread.authorize(creds)
+    try:
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPE)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"Hitelesítési hiba: {e}")
+        return None
 
-try:
-    gc = get_gc()
-    sh = gc.open("Terkep_Adatbazis")
-    sheet_allomasok = sh.worksheet("Allomasok")
-    sheet_naplo = sh.worksheet("Naplo")
-    sheet_tech = sh.worksheet("Technikusok")
-    sheet_vezenyles = sh.worksheet("Vezenylesek")
-except Exception as e:
-    st.error(f"Kapcsolati hiba: {e}")
+gc = get_gc()
+if gc:
+    try:
+        sh = gc.open("Terkep_Adatbazis")
+        sheet_allomasok = sh.worksheet("Allomasok")
+        sheet_naplo = sh.worksheet("Naplo")
+        sheet_tech = sh.worksheet("Technikusok")
+        sheet_vezenyles = sh.worksheet("Vezenylesek")
+    except Exception as e:
+        st.error(f"Sheet elérés hiba: {e}")
+        st.stop()
+else:
     st.stop()
 
 # ---------- SEGÉDFÜGGVÉNYEK ----------
 def safe_date(d_attr):
-    """Kezeli ha a dátum a Sheet-ben nem YYYY-MM-DD formátumú"""
+    """Kezeli a különböző dátumformátumokat és megvédi az appot az összeomlástól."""
     if isinstance(d_attr, date):
         return d_attr
+    if not d_attr:
+        return date.today()
     try:
+        # Próbáljuk meg kinyerni a szövegből a dátumot
         return datetime.strptime(str(d_attr).strip(), "%Y-%m-%d").date()
     except:
         return date.today()
 
-# ---------- DATA LOADING ----------
-# A gyorsabb működés érdekében nem használunk cache-t a változó adatokra
+# Adatok betöltése
 st_data = sheet_allomasok.get_all_records()
 log_data = sheet_naplo.get_all_records()
 tech_data = sheet_tech.get_all_records()
 vez_data = sheet_vezenyles.get_all_records()
-
 tech_names = [t['Nev'] for t in tech_data if t.get('Nev')]
 
-# ---------- SIDEBAR - ÚJ ADATBEVITEL ----------
-st.sidebar.header("📝 Új hiba rögzítése")
-with st.sidebar.form("hiba_form"):
-    st_station = st.selectbox("Kút kiválasztása", [s['Nev'] for s in st_data])
-    st_desc = st.text_input("Hiba leírása")
-    st_date = st.date_input("Hiba észlelése", date.today())
-    st_time = st.selectbox("Időpont", [f"{h:02d}:{m:02d}" for h in range(6,22) for m in (0,30)])
-    if st.form_submit_button("Hiba Mentése"):
-        sheet_naplo.append_row([st_station, str(st_date), st_desc, st_time])
-        st.success("Mentve!")
-        st.rerun()
+# ---------- OLDALSÁV (SIDEBAR) ----------
+st.sidebar.title("🛠️ Kezelőpanel")
 
-st.sidebar.header("👷 Beosztás készítése")
-with st.sidebar.form("vez_form"):
-    sel_tech = st.selectbox("Technikus", tech_names)
-    # Csak azokat a hibákat mutatjuk, amik a log_data-ban vannak
-    hiba_options = [f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})" for l in log_data]
-    sel_hiba = st.selectbox("Melyik hibára?", hiba_options) if hiba_options else st.selectbox("Nincs hiba", ["-"])
-    sel_date = st.date_input("Munkavégzés napja", date.today())
-    if st.form_submit_button("Beosztás Mentése"):
-        sheet_vezenyles.append_row([sel_tech, sel_hiba.split(": ")[0], str(sel_date), sel_hiba])
-        st.success("Vezényelve!")
-        st.rerun()
+# 1. Új hiba felvitele
+with st.sidebar.expander("📝 Új hiba rögzítése", expanded=False):
+    with st.form("new_fault"):
+        f_station = st.selectbox("Kút", [s['Nev'] for s in st_data])
+        f_desc = st.text_input("Leírás")
+        f_date = st.date_input("Dátum", date.today())
+        f_time = st.selectbox("Idő", [f"{h:02d}:{m:02d}" for h in range(6,22) for m in (0,30)])
+        if st.form_submit_button("Mentés"):
+            sheet_naplo.append_row([f_station, str(f_date), f_desc, f_time])
+            st.rerun()
 
-# ---------- MAIN - NAPI LISTÁK ----------
-st.title("🗺️ Karbantartási Vezénylő - Áttekintés")
+# 2. Beosztás készítése
+with st.sidebar.expander("👷 Technikus vezénylése", expanded=False):
+    with st.form("assign_tech"):
+        v_tech = st.selectbox("Technikus", tech_names)
+        hiba_list = [f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})" for l in log_data]
+        v_hiba = st.selectbox("Melyik hiba?", hiba_list) if hiba_list else st.selectbox("Nincs hiba", ["-"])
+        v_date = st.date_input("Munkavégzés napja", date.today())
+        if st.form_submit_button("Beosztás"):
+            sheet_vezenyles.append_row([v_tech, v_hiba.split(": ")[0], str(v_date), v_hiba])
+            st.rerun()
+
+# ---------- FŐOLDAL - MÁTRIX NÉZET ----------
+st.title("📅 Napi Vezénylési Terv")
 
 if not log_data:
-    st.info("Nincs rögzített hiba a rendszerben.")
+    st.info("Nincs rögzített hiba.")
 else:
-    # Aktív napok kigyűjtése
+    # Oszlopok létrehozása a rögzített hiba-napok alapján
     unique_days = sorted(list(set(str(l['Datum']) for l in log_data)))
     cols = st.columns(len(unique_days))
 
     for col, day_str in zip(cols, unique_days):
-        col.subheader(f"📅 {day_str}")
+        col.markdown(f"### {day_str}")
         
-        # Hibák szűrése az adott napra
         for i, l in enumerate(log_data):
             if str(l['Datum']) == day_str:
                 hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
                 
-                with col.expander(f"🔍 {l.get('Ido','--')} - {l['Allomas_Neve']}", expanded=True):
-                    st.write(f"**Hiba:** {l['Leiras']}")
+                with col.container(border=True):
+                    st.markdown(f"**{l.get('Ido','--')} - {l['Allomas_Neve']}**")
+                    st.caption(f"_{l['Leiras']}_")
                     
-                    # 1. Van-e beosztva valaki?
+                    # Beosztás keresése (bármilyen dátumra is szól)
                     found_vez = False
                     for v_i, v in enumerate(vez_data):
                         if v.get('Hiba') == hiba_id:
                             found_vez = True
                             st.success(f"👷 {v['Technikus_Neve']}")
+                            st.caption(f"📅 Ütemezve: {v['Datum']}")
                             
-                            # Technikus módosítása (index + 2 a fejléc miatt)
-                            new_tech = st.selectbox("Csere", tech_names, 
-                                                    index=tech_names.index(v['Technikus_Neve']) if v['Technikus_Neve'] in tech_names else 0,
-                                                    key=f"tech_{day_str}_{i}_{v_i}")
-                            if new_tech != v['Technikus_Neve']:
-                                sheet_vezenyles.update_cell(v_i + 2, 1, new_tech)
+                            # Technikus csere
+                            new_t = st.selectbox("Csere", tech_names, 
+                                                 index=tech_names.index(v['Technikus_Neve']) if v['Technikus_Neve'] in tech_names else 0,
+                                                 key=f"t_{day_str}_{i}_{v_i}")
+                            if new_t != v['Technikus_Neve']:
+                                sheet_vezenyles.update_cell(v_i + 2, 1, new_t)
                                 st.rerun()
-                            
-                            # Tervezett dátum módosítása
-                            new_v_date = st.date_input("Új ütemezés", safe_date(v['Datum']), key=f"vdate_{day_str}_{i}_{v_i}")
-                            if str(new_v_date) != str(v['Datum']):
-                                sheet_vezenyles.update_cell(v_i + 2, 3, str(new_v_date))
+                                
+                            # Ütemezett nap módosítása
+                            new_vd = st.date_input("Új ütemezés", safe_date(v['Datum']), key=f"vd_{day_str}_{i}_{v_i}")
+                            if str(new_vd) != str(v['Datum']):
+                                sheet_vezenyles.update_cell(v_i + 2, 3, str(new_vd))
                                 st.rerun()
 
                     if not found_vez:
                         st.warning("Nincs beosztva")
 
-                    st.divider()
-                    
-                    # 2. Alap hiba módosítása (Naplo)
-                    new_l_date = st.date_input("Hiba napja áthelyezése", safe_date(l['Datum']), key=f"ldate_{day_str}_{idx}")
-                    if str(new_l_date) != str(l['Datum']):
-                        sheet_naplo.update_cell(i + 2, 2, str(new_l_date))
-                        st.rerun()
+                    # Műveletek a hibával (Naplo)
+                    with st.expander("⚙️ Szerkesztés"):
+                        # Hiba napjának áthelyezése
+                        new_ld = st.date_input("Hiba napja", safe_date(l['Datum']), key=f"ld_{day_str}_{i}")
+                        if str(new_ld) != str(l['Datum']):
+                            sheet_naplo.update_cell(i + 2, 2, str(new_ld))
+                            st.rerun()
 
-                    if st.button("Hiba Törlése", key=f"del_{day_str}_{i}", use_container_width=True):
-                        sheet_naplo.delete_rows(i + 2)
-                        st.rerun()
+                        if st.button("🗑️ Törlés", key=f"del_{day_str}_{i}"):
+                            sheet_naplo.delete_rows(i + 2)
+                            st.rerun()
 
-# ---------- TÉRKÉP MEGJELENÍTÉSE ----------
-st.markdown("### 📍 Térképes nézet")
+# ---------- TÉRKÉP ----------
+st.divider()
+st.subheader("📍 Helyszíni áttekintés")
 m = folium.Map(location=[47.1625, 19.5033], zoom_start=7)
 
 for l in log_data:
-    # Állomás keresése a koordinátákhoz
-    stn_list = [s for s in st_data if s['Nev'] == l['Allomas_Neve']]
-    if stn_list:
-        stn = stn_list[0]
+    # Koordináták kikeresése
+    stn_match = [s for s in st_data if s['Nev'] == l['Allomas_Neve']]
+    if stn_match:
+        stn = stn_match[0]
         hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
         is_vez = any(v.get('Hiba') == hiba_id for v in vez_data)
-
+        
         folium.Marker(
             [stn['Lat'], stn['Lon']],
             popup=f"<b>{l['Allomas_Neve']}</b><br>{l['Leiras']}",
-            tooltip=f"{l['Allomas_Neve']}",
-            icon=folium.Icon(
-                color="green" if is_vez else "red",
-                icon="wrench" if is_vez else "exclamation",
-                prefix="fa"
-            )
+            icon=folium.Icon(color="green" if is_vez else "red", icon="wrench" if is_vez else "exclamation", prefix="fa")
         ).add_to(m)
 
 st_folium(m, width=1200, height=500, returned_objects=[])
