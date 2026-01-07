@@ -134,4 +134,4 @@ for l in log_data:
             popup=f"{l['Allomas_Neve']}",
             icon=folium.Icon(color="green" if is_vez else "red", icon="wrench" if is_vez else "exclamation", prefix="fa")
         ).add_to(m)
-st_folium(m, width=1200, height=500, returned_objects=[])s
+st_folium(m, width=1200, height=500, returned_objects=[])
