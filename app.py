@@ -3,172 +3,151 @@ import gspread
 from google.oauth2.service_account import Credentials
 import folium
 from streamlit_folium import st_folium
-from datetime import date
+from datetime import date, datetime
 
-# --- Ellenőrző rész ---
-SCOPE = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
-try:
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=SCOPE
-    )
-    gc = gspread.authorize(creds)
-
-    # Próbáljuk meg megnyitni a Sheet-et
-    sh = gc.open("Terkep_Adatbazis")
-    st.success("🎉 A Google Sheet elérhető! A kapcsolat működik.")
-except Exception as e:
-    st.error(f"⚠️ Hiba a Sheet elérésében: {e}")
-
-# ---------- GOOGLE AUTH ----------
-SCOPE = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
-creds = Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"],
-    scopes=SCOPE
-)
-gc = gspread.authorize(creds)
-
-# ---------- SHEETS ----------
-sh = gc.open("Terkep_Adatbazis")
-sheet_allomasok = sh.worksheet("Allomasok")
-sheet_naplo = sh.worksheet("Naplo")
-sheet_tech = sh.worksheet("Technikusok")
-sheet_vezenyles = sh.worksheet("Vezenylesek")
-
-# ---------- DATA ----------
-def load_all():
-    return (
-        sheet_allomasok.get_all_records(),
-        sheet_naplo.get_all_records(),
-        sheet_tech.get_all_records(),
-        sheet_vezenyles.get_all_records()
-    )
-
-# ---------- OPERATIONS ----------
-def save_work(station, d, desc, t):
-    sheet_naplo.append_row([station, str(d), desc, t])
-
-def save_assign(tech, station, d, hiba):
-    sheet_vezenyles.append_row([tech, station, str(d), hiba])
-
-def update_assign(idx, tech):
-    sheet_vezenyles.update_cell(idx + 2, 1, tech)
-
-def update_assign_date(idx, d):
-    sheet_vezenyles.update_cell(idx + 2, 3, str(d))
-
-def delete_task(idx):
-    sheet_naplo.delete_rows(idx + 2)
-
-def move_task_date(idx, d):
-    sheet_naplo.update_cell(idx + 2, 2, str(d))
-
-# ---------- UI ----------
+# ---------- CONFIG & AUTH ----------
 st.set_page_config(layout="wide", page_title="Karbantartási Vezénylő")
 
-st.title("🗺️ Karbantartási Vezénylő")
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
-st_data, log_data, tech_data, vez_data = load_all()
-tech_names = [t['Nev'] for t in tech_data]
+# Biztonságos betöltés
+@st.cache_resource
+def get_gc():
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPE)
+    return gspread.authorize(creds)
 
-# --- SIDEBAR ---
-st.sidebar.header("📝 Új hiba")
-st_station = st.sidebar.selectbox("Kút", [s['Nev'] for s in st_data])
-st_desc = st.sidebar.text_input("Hiba")
-st_date = st.sidebar.date_input("Hiba napja", date.today())
-st_time = st.sidebar.selectbox(
-    "Idő",
-    [f"{h:02d}:{m:02d}" for h in range(6,22) for m in (0,30)]
-)
+try:
+    gc = get_gc()
+    sh = gc.open("Terkep_Adatbazis")
+    sheet_allomasok = sh.worksheet("Allomasok")
+    sheet_naplo = sh.worksheet("Naplo")
+    sheet_tech = sh.worksheet("Technikusok")
+    sheet_vezenyles = sh.worksheet("Vezenylesek")
+except Exception as e:
+    st.error(f"Kapcsolati hiba: {e}")
+    st.stop()
 
-if st.sidebar.button("Mentés"):
-    save_work(st_station, st_date, st_desc, st_time)
-    st.experimental_rerun()
+# ---------- SEGÉDFÜGGVÉNYEK ----------
+def safe_date(d_attr):
+    """Kezeli ha a dátum a Sheet-ben nem YYYY-MM-DD formátumú"""
+    if isinstance(d_attr, date):
+        return d_attr
+    try:
+        return datetime.strptime(str(d_attr).strip(), "%Y-%m-%d").date()
+    except:
+        return date.today()
 
-st.sidebar.header("👷 Beosztás")
-sel_tech = st.sidebar.selectbox("Technikus", tech_names)
-sel_hiba = st.sidebar.selectbox(
-    "Hiba",
-    [f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})" for l in log_data]
-)
-sel_date = st.sidebar.date_input("Mikorra", date.today())
+# ---------- DATA LOADING ----------
+# A gyorsabb működés érdekében nem használunk cache-t a változó adatokra
+st_data = sheet_allomasok.get_all_records()
+log_data = sheet_naplo.get_all_records()
+tech_data = sheet_tech.get_all_records()
+vez_data = sheet_vezenyles.get_all_records()
 
-if st.sidebar.button("Beosztás"):
-    save_assign(sel_tech, sel_hiba.split(": ")[0], sel_date, sel_hiba)
-    st.experimental_rerun()
+tech_names = [t['Nev'] for t in tech_data if t.get('Nev')]
 
-# --- MAIN ---
-cols = st.columns(len(set(l['Datum'] for l in log_data)) or 1)
+# ---------- SIDEBAR - ÚJ ADATBEVITEL ----------
+st.sidebar.header("📝 Új hiba rögzítése")
+with st.sidebar.form("hiba_form"):
+    st_station = st.selectbox("Kút kiválasztása", [s['Nev'] for s in st_data])
+    st_desc = st.text_input("Hiba leírása")
+    st_date = st.date_input("Hiba észlelése", date.today())
+    st_time = st.selectbox("Időpont", [f"{h:02d}:{m:02d}" for h in range(6,22) for m in (0,30)])
+    if st.form_submit_button("Hiba Mentése"):
+        sheet_naplo.append_row([st_station, str(st_date), st_desc, st_time])
+        st.success("Mentve!")
+        st.rerun()
 
-for col, day in zip(cols, sorted(set(l['Datum'] for l in log_data))):
-    col.markdown(f"### 📅 {day}")
+st.sidebar.header("👷 Beosztás készítése")
+with st.sidebar.form("vez_form"):
+    sel_tech = st.selectbox("Technikus", tech_names)
+    # Csak azokat a hibákat mutatjuk, amik a log_data-ban vannak
+    hiba_options = [f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})" for l in log_data]
+    sel_hiba = st.selectbox("Melyik hibára?", hiba_options) if hiba_options else st.selectbox("Nincs hiba", ["-"])
+    sel_date = st.date_input("Munkavégzés napja", date.today())
+    if st.form_submit_button("Beosztás Mentése"):
+        sheet_vezenyles.append_row([sel_tech, sel_hiba.split(": ")[0], str(sel_date), sel_hiba])
+        st.success("Vezényelve!")
+        st.rerun()
 
-    for i, l in enumerate(log_data):
-        if l['Datum'] != day:
-            continue
+# ---------- MAIN - NAPI LISTÁK ----------
+st.title("🗺️ Karbantartási Vezénylő - Áttekintés")
 
-        hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
+if not log_data:
+    st.info("Nincs rögzített hiba a rendszerben.")
+else:
+    # Aktív napok kigyűjtése
+    unique_days = sorted(list(set(str(l['Datum']) for l in log_data)))
+    cols = st.columns(len(unique_days))
 
-        with col.container():
-            st.markdown(f"**{l.get('Ido','08:00')} – {l['Allomas_Neve']}**")
-            st.caption(l['Leiras'])
+    for col, day_str in zip(cols, unique_days):
+        col.subheader(f"📅 {day_str}")
+        
+        # Hibák szűrése az adott napra
+        for i, l in enumerate(log_data):
+            if str(l['Datum']) == day_str:
+                hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
+                
+                with col.expander(f"🔍 {l.get('Ido','--')} - {l['Allomas_Neve']}", expanded=True):
+                    st.write(f"**Hiba:** {l['Leiras']}")
+                    
+                    # 1. Van-e beosztva valaki?
+                    found_vez = False
+                    for v_i, v in enumerate(vez_data):
+                        if v.get('Hiba') == hiba_id:
+                            found_vez = True
+                            st.success(f"👷 {v['Technikus_Neve']}")
+                            
+                            # Technikus módosítása (index + 2 a fejléc miatt)
+                            new_tech = st.selectbox("Csere", tech_names, 
+                                                    index=tech_names.index(v['Technikus_Neve']) if v['Technikus_Neve'] in tech_names else 0,
+                                                    key=f"tech_{day_str}_{i}_{v_i}")
+                            if new_tech != v['Technikus_Neve']:
+                                sheet_vezenyles.update_cell(v_i + 2, 1, new_tech)
+                                st.rerun()
+                            
+                            # Tervezett dátum módosítása
+                            new_v_date = st.date_input("Új ütemezés", safe_date(v['Datum']), key=f"vdate_{day_str}_{i}_{v_i}")
+                            if str(new_v_date) != str(v['Datum']):
+                                sheet_vezenyles.update_cell(v_i + 2, 3, str(new_v_date))
+                                st.rerun()
 
-            for v_i, v in enumerate(vez_data):
-                if v['Hiba'] == hiba_id:
-                    new_tech = st.selectbox(
-                        "Technikus",
-                        tech_names,
-                        index=tech_names.index(v['Technikus_Neve']),
-                        key=f"t{v_i}"
-                    )
-                    if st.button("Csere", key=f"c{v_i}"):
-                        update_assign(v_i, new_tech)
-                        st.experimental_rerun()
+                    if not found_vez:
+                        st.warning("Nincs beosztva")
 
-                    new_d = st.date_input(
-                        "Ütemezett dátum",
-                        date.fromisoformat(v['Datum']),
-                        key=f"d{v_i}"
-                    )
-                    if st.button("Idő mód.", key=f"m{v_i}"):
-                        update_assign_date(v_i, new_d)
-                        st.experimental_rerun()
+                    st.divider()
+                    
+                    # 2. Alap hiba módosítása (Naplo)
+                    new_l_date = st.date_input("Hiba napja áthelyezése", safe_date(l['Datum']), key=f"ldate_{day_str}_{idx}")
+                    if str(new_l_date) != str(l['Datum']):
+                        sheet_naplo.update_cell(i + 2, 2, str(new_l_date))
+                        st.rerun()
 
-            new_d = st.date_input("Hiba napjának módosítása",
-                                  date.fromisoformat(day),
-                                  key=f"mv{i}")
-            if st.button("Áthelyez", key=f"mvb{i}"):
-                move_task_date(i, new_d)
-                st.experimental_rerun()
+                    if st.button("Hiba Törlése", key=f"del_{day_str}_{i}", use_container_width=True):
+                        sheet_naplo.delete_rows(i + 2)
+                        st.rerun()
 
-            if st.button("Törlés", key=f"del{i}"):
-                delete_task(i)
-                st.experimental_rerun()
-
-# --- MAP ---
+# ---------- TÉRKÉP MEGJELENÍTÉSE ----------
+st.markdown("### 📍 Térképes nézet")
 m = folium.Map(location=[47.1625, 19.5033], zoom_start=7)
 
 for l in log_data:
-    stn = next(s for s in st_data if s['Nev'] == l['Allomas_Neve'])
-    hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
-    is_vez = any(v['Hiba'] == hiba_id for v in vez_data)
+    # Állomás keresése a koordinátákhoz
+    stn_list = [s for s in st_data if s['Nev'] == l['Allomas_Neve']]
+    if stn_list:
+        stn = stn_list[0]
+        hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
+        is_vez = any(v.get('Hiba') == hiba_id for v in vez_data)
 
-    folium.Marker(
-        [stn['Lat'], stn['Lon']],
-        popup=f"{l['Allomas_Neve']} – {l['Leiras']}",
-        icon=folium.Icon(
-            color="green" if is_vez else "red",
-            icon="wrench" if is_vez else "exclamation",
-            prefix="fa"
-        )
-    ).add_to(m)
+        folium.Marker(
+            [stn['Lat'], stn['Lon']],
+            popup=f"<b>{l['Allomas_Neve']}</b><br>{l['Leiras']}",
+            tooltip=f"{l['Allomas_Neve']}",
+            icon=folium.Icon(
+                color="green" if is_vez else "red",
+                icon="wrench" if is_vez else "exclamation",
+                prefix="fa"
+            )
+        ).add_to(m)
 
-st_folium(m, width=1200)
+st_folium(m, width=1200, height=500, returned_objects=[])
