@@ -51,7 +51,6 @@ def safe_date(d_attr):
 # ---------- OLDALSÁV (SIDEBAR) ----------
 st.sidebar.title("🛠️ Kezelőpanel")
 
-# --- SZŰRÉS ---
 st.sidebar.subheader("🔍 Szűrés")
 only_unplanned = st.sidebar.toggle("Csak a beütemezetlen munkák", value=False)
 
@@ -59,7 +58,6 @@ if st.sidebar.button("🔄 Adatok frissítése"):
     st.cache_data.clear()
     st.rerun()
 
-# 1. Új hiba felvitele
 with st.sidebar.expander("📝 Új hiba rögzítése"):
     with st.form("new_fault", clear_on_submit=True):
         f_station = st.selectbox("Kút", [s['Nev'] for s in st_data])
@@ -71,7 +69,6 @@ with st.sidebar.expander("📝 Új hiba rögzítése"):
             st.cache_data.clear()
             st.rerun()
 
-# 2. Beosztás készítése
 with st.sidebar.expander("👷 Technikus vezénylése"):
     with st.form("assign_tech", clear_on_submit=True):
         v_tech = st.selectbox("Technikus", tech_names)
@@ -86,111 +83,108 @@ with st.sidebar.expander("👷 Technikus vezénylése"):
 # ---------- FŐOLDAL - MÁTRIX NÉZET ----------
 st.title("📅 Összes munka")
 
-if not log_data:
-    st.info("Nincs rögzített hiba.")
+display_data = []
+for l in log_data:
+    hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
+    vez_info = next((v for v in vez_data if v.get('Hiba') == hiba_id), None)
+    if only_unplanned and vez_info: continue
+    display_data.append((l, vez_info))
+
+if not display_data:
+    st.info("Nincs megjeleníthető munka.")
 else:
-    # Oszlopok kiszámítása (szűrés figyelembevételével)
-    display_data = []
-    for l in log_data:
-        hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
-        vez_info = next((v for v in vez_data if v.get('Hiba') == hiba_id), None)
-        
-        if only_unplanned and vez_info:
-            continue
-        display_data.append((l, vez_info))
+    unique_days = sorted(list(set(str(item[0]['Datum']) for item in display_data)))
+    cols = st.columns(len(unique_days))
 
-    if not display_data:
-        st.success("Minden munka be van ütemezve! 🎉")
-    else:
-        unique_days = sorted(list(set(str(item[0]['Datum']) for item in display_data)))
-        cols = st.columns(len(unique_days) if len(unique_days) > 0 else 1)
-
-        for col, day_str in zip(cols, unique_days):
-            col.markdown(f"### {day_str}")
-            for i, (l, v) in enumerate(display_data):
-                if str(l['Datum']) == day_str:
-                    hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
+    for col, day_str in zip(cols, unique_days):
+        col.markdown(f"### {day_str}")
+        for i, (l, v) in enumerate(display_data):
+            if str(l['Datum']) == day_str:
+                hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
+                with col.container(border=True):
+                    st.markdown(f"**{l.get('Ido','--')} - {l['Allomas_Neve']}**")
+                    st.caption(f"_{l['Leiras']}_")
                     
-                    with col.container(border=True):
-                        st.markdown(f"**{l.get('Ido','--')} - {l['Allomas_Neve']}**")
-                        st.caption(f"_{l['Leiras']}_")
+                    if v:
+                        st.success(f"👷 {v['Technikus_Neve']}")
+                        # Technikust és időt tervezés után is lehet váltani
+                        new_t = st.selectbox("Technikus mód.", tech_names, 
+                                             index=tech_names.index(v['Technikus_Neve']) if v['Technikus_Neve'] in tech_names else 0,
+                                             key=f"t_mod_{i}_{day_str}")
                         
-                        if v:
-                            st.success(f"👷 {v['Technikus_Neve']}")
-                            # TECHNIKUS ÉS DÁTUM MÓDOSÍTÁSA TERVEZÉS UTÁN
-                            new_t = st.selectbox("Technikus módosítása", tech_names, 
-                                                 index=tech_names.index(v['Technikus_Neve']) if v['Technikus_Neve'] in tech_names else 0,
-                                                 key=f"t_mod_{i}")
-                            
-                            # Megkeressük az eredeti sort a vezénylés táblában a módosításhoz
-                            # (Ehhez az összes vez_data-ból kell az index)
-                            orig_v_idx = next((idx for idx, row in enumerate(vez_data) if row.get('Hiba') == hiba_id), None)
-                            
-                            if new_t != v['Technikus_Neve'] and orig_v_idx is not None:
-                                get_sheets().worksheet("Vezenylesek").update_cell(orig_v_idx + 2, 1, new_t)
+                        orig_v_idx = next((idx for idx, row in enumerate(vez_data) if row.get('Hiba') == hiba_id), None)
+                        
+                        if new_t != v['Technikus_Neve'] and orig_v_idx is not None:
+                            get_sheets().worksheet("Vezenylesek").update_cell(orig_v_idx + 2, 1, new_t)
+                            st.cache_data.clear()
+                            st.rerun()
+
+                        new_vd = st.date_input("Terv. dátum mód.", safe_date(v['Datum']), key=f"vd_mod_{i}_{day_str}")
+                        if str(new_vd) != str(v['Datum']) and orig_v_idx is not None:
+                            get_sheets().worksheet("Vezenylesek").update_cell(orig_v_idx + 2, 3, str(new_vd))
+                            st.cache_data.clear()
+                            st.rerun()
+                    else:
+                        st.warning("Nincs beosztva")
+
+                    with st.expander("⚙️"):
+                        if st.button("🗑️ Törlés", key=f"del_{i}_{day_str}"):
+                            orig_l_idx = next((idx for idx, row in enumerate(log_data) if f"{row['Allomas_Neve']}: {row['Leiras']} ({row['Datum']})" == hiba_id), None)
+                            if orig_l_idx is not None:
+                                get_sheets().worksheet("Naplo").delete_rows(orig_l_idx + 2)
                                 st.cache_data.clear()
                                 st.rerun()
 
-                            new_vd = st.date_input("Tervezett dátum módosítása", safe_date(v['Datum']), key=f"vd_mod_{i}")
-                            if str(new_vd) != str(v['Datum']) and orig_v_idx is not None:
-                                get_sheets().worksheet("Vezenylesek").update_cell(orig_v_idx + 2, 3, str(new_vd))
-                                st.cache_data.clear()
-                                st.rerun()
-                        else:
-                            st.warning("Nincs beosztva")
-
-                        with st.expander("⚙️ Alapadatok szerkesztése"):
-                            if st.button("🗑️ Hiba törlése", key=f"del_{i}", use_container_width=True):
-                                # Itt az eredeti log_data indexet kell megtalálni a törléshez
-                                orig_l_idx = next((idx for idx, row in enumerate(log_data) if f"{row['Allomas_Neve']}: {row['Leiras']} ({row['Datum']})" == hiba_id), None)
-                                if orig_l_idx is not None:
-                                    get_sheets().worksheet("Naplo").delete_rows(orig_l_idx + 2)
-                                    st.cache_data.clear()
-                                    st.rerun()
-
-# ---------- TÉRKÉP (ÖSSZEVONT NÉZET) ----------
+# ---------- TÉRKÉP (SZÁMOKKAL A JELÖLŐN) ----------
 st.divider()
 st.subheader("📍 Helyszíni áttekintés")
 m = folium.Map(location=[47.1625, 19.5033], zoom_start=7)
 
-# Állomások csoportosítása a térképhez
 station_summary = {}
 for l in log_data:
     hiba_id = f"{l['Allomas_Neve']}: {l['Leiras']} ({l['Datum']})"
     vez_info = any(v.get('Hiba') == hiba_id for v in vez_data)
+    if only_unplanned and vez_info: continue
     
-    # Ha be van kapcsolva a szűrő, csak a beütemezetleneket számoljuk
-    if only_unplanned and vez_info:
-        continue
-        
     s_name = l['Allomas_Neve']
     if s_name not in station_summary:
         stn_match = [s for s in st_data if s['Nev'] == s_name]
         if stn_match:
-            station_summary[s_name] = {
-                "coords": [stn_match[0]['Lat'], stn_match[0]['Lon']],
-                "hibak": [],
-                "minden_beosztva": True
-            }
+            station_summary[s_name] = {"coords": [stn_match[0]['Lat'], stn_match[0]['Lon']], "hibak": [], "kesz": True}
     
     if s_name in station_summary:
-        station_summary[s_name]["hibak"].append(f"• {l['Leiras']} ({'KÉSZ' if vez_info else 'ÚJ'})")
-        if not vez_info:
-            station_summary[s_name]["minden_beosztva"] = False
+        station_summary[s_name]["hibak"].append(f"• {l['Leiras']}")
+        if not vez_info: station_summary[s_name]["kesz"] = False
 
 for s_name, info in station_summary.items():
-    hiba_szam = len(info['hibak'])
-    popup_text = f"<b>{s_name}</b><br>Összes hiba: {hiba_szam}<br>" + "<br>".join(info['hibak'])
+    count = len(info['hibak'])
+    color = "#27ae60" if info['kesz'] else "#e74c3c" # Zöld vagy Piros
+    
+    # EGYEDI SZÁMOZOTT JELÖLŐ (HTML + CSS)
+    icon_html = f"""
+        <div style="
+            background-color: {color};
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 2px solid white;
+            color: white;
+            font-weight: bold;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0px 0px 5px rgba(0,0,0,0.5);
+            font-size: 14px;
+        ">
+            {count}
+        </div>
+    """
     
     folium.Marker(
         location=info['coords'],
-        popup=folium.Popup(popup_text, max_width=300),
-        tooltip=f"{s_name}: {hiba_szam} hiba",
-        icon=folium.Icon(
-            color="green" if info['minden_beosztva'] else "red", 
-            icon="wrench" if info['minden_beosztva'] else "exclamation", 
-            prefix="fa"
-        )
+        icon=folium.DivIcon(html=icon_html),
+        popup=folium.Popup(f"<b>{s_name}</b><br>" + "<br>".join(info['hibak']), max_width=300),
+        tooltip=f"{s_name}: {count} hiba"
     ).add_to(m)
 
 st_folium(m, width=1200, height=500, returned_objects=[])
