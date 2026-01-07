@@ -4,7 +4,6 @@ from google.oauth2.service_account import Credentials
 import folium
 from streamlit_folium import st_folium
 from datetime import date, datetime
-from geopy.geocoders import Nominatim
 
 # ---------- KONFIGURÁCIÓ ----------
 st.set_page_config(layout="wide", page_title="Karbantartási Vezénylő")
@@ -33,13 +32,7 @@ def run_operation(func, *args):
         st.cache_data.clear()
         st.rerun()
     except Exception as e:
-        st.error(f"Hiba: {e}")
-
-# ---------- SEGÉDFÜGGVÉNYEK ----------
-def get_hiba_id(row):
-    # A 'Vissza kell menni' státusz kezelése az azonosítóban
-    vissza = " [!] VISSZA KELL MENNI" if str(row.get('Statusz', '')) == 'VISSZA' else ""
-    return f"{row.get('Allomas_Neve')}: {row.get('Kod', '')} - {row.get('Leiras', '')}{vissza} ({row.get('Datum', '')})"
+        st.error(f"Hiba a művelet során: {e}")
 
 # ---------- ADATOK BETÖLTÉSE ----------
 try:
@@ -48,25 +41,36 @@ try:
     st_data, log_data, tech_data, vez_data = data["st"], data["log"], data["tech"], data["vez"]
     tech_names = [t['Nev'] for t in tech_data if t.get('Nev')]
 except Exception as e:
-    st.error("Adatbázis hiba.")
+    st.error(f"Adatbázis hiba: {e}")
+    st.info("Tipp: Ellenőrizd az Allomasok (4 oszlop) és Naplo (6 oszlop) fül szerkezetét!")
     st.stop()
 
-# ---------- OLDALSÁV ----------
+def get_hiba_id(row):
+    vissza = " [!] VISSZA KELL MENNI" if str(row.get('Statusz', '')) == 'VISSZA' else ""
+    return f"{row.get('Allomas_Neve')}: {row.get('Kod', '')} - {row.get('Leiras', '')}{vissza} ({row.get('Datum', '')})"
+
+# ---------- OLDALSÁV (SIDEBAR) ----------
 st.sidebar.title("🛠️ Kezelőpanel")
 
+# 1. ÚJ ÁLLOMÁS HOZZÁADÁSA (Kézi koordinátákkal)
 with st.sidebar.expander("➕ Új állomás felvétele"):
     with st.form("new_station"):
-        n_name = st.text_input("Állomás neve")
+        n_name = st.text_input("Állomás neve (pl. Szentlőrinc MOL)")
         n_type = st.selectbox("Típus", ["MOL", "ORLEN"])
-        n_address = st.text_input("Város/Cím a koordinátákhoz")
-        if st.form_submit_button("Mentés"):
-            try:
-                loc = Nominatim(user_agent="karb_app").geocode(f"{n_address}, Hungary")
-                if loc:
-                    run_operation(sh.worksheet("Allomasok").append_row, [n_name, loc.latitude, loc.longitude, n_type])
-                else: st.error("Cím nem található.")
-            except: st.error("Hiba a kereséskor.")
+        
+        st.write("📍 Koordináták megadása:")
+        # Számos bevitel a koordinátáknak
+        n_lat = st.number_input("Szélesség (Lat) - pl: 46.0403", format="%.4f", value=47.1625)
+        n_lon = st.number_input("Hosszúság (Lon) - pl: 17.9898", format="%.4f", value=19.5033)
+        
+        if st.form_submit_button("Állomás mentése"):
+            # Allomasok fül: Nev, Lat, Lon, Tipus
+            run_operation(sh.worksheet("Allomasok").append_row, [n_name, n_lat, n_lon, n_type])
+            st.success(f"{n_name} elmentve!")
 
+st.sidebar.divider()
+
+# 2. ÚJ HIBA RÖGZÍTÉSE
 with st.sidebar.expander("📝 Új hiba rögzítése"):
     with st.form("new_fault", clear_on_submit=True):
         station_options = [f"{s['Nev']} ({s.get('Tipus', '?')})" for s in st_data]
@@ -78,6 +82,7 @@ with st.sidebar.expander("📝 Új hiba rögzítése"):
         if st.form_submit_button("Hiba rögzítése"):
             run_operation(sh.worksheet("Naplo").append_row, [f_station_raw.split(" (")[0], str(f_date), f_desc, f_time, f_kod, "ÚJ"])
 
+# 3. BEOSZTÁS
 with st.sidebar.expander("👷 Technikus vezénylése"):
     with st.form("assign_tech", clear_on_submit=True):
         v_tech = st.selectbox("Technikus", tech_names)
@@ -116,10 +121,9 @@ else:
                     st.markdown(f"*{l.get('Kod', '')}* - {l.get('Leiras')}")
                     
                     if v:
-                        st.success(f"👷 {v['Technikus_Neve']} ({v['Datum']})")
+                        st.success(f"👷 {v['Technikus_Neve']}")
                         c1, c2 = st.columns(2)
                         if c1.button("✅ Kész", key=f"done_{i}_{day_str}"):
-                            # Törlés mindkét helyről
                             l_idx = next((idx for idx, row in enumerate(log_data) if get_hiba_id(row) == h_id), None)
                             if l_idx is not None: sh.worksheet("Naplo").delete_rows(l_idx + 2)
                             v_idx = next((idx for idx, row in enumerate(vez_data) if row.get('Hiba') == h_id), None)
@@ -127,7 +131,6 @@ else:
                             st.cache_data.clear(); st.rerun()
                         
                         if c2.button("🔄 Vissza", key=f"back_{i}_{day_str}"):
-                            # Státusz frissítése Naplóban, Beosztás törlése
                             l_idx = next((idx for idx, row in enumerate(log_data) if get_hiba_id(row) == h_id), None)
                             if l_idx is not None: sh.worksheet("Naplo").update_cell(l_idx + 2, 6, "VISSZA")
                             v_idx = next((idx for idx, row in enumerate(vez_data) if row.get('Hiba') == h_id), None)
@@ -136,14 +139,7 @@ else:
                     else:
                         st.warning("Beosztásra vár")
 
-                    if st.button("🗑️ Törlés", key=f"del_{i}_{day_str}", use_container_width=True):
-                        l_idx = next((idx for idx, row in enumerate(log_data) if get_hiba_id(row) == h_id), None)
-                        if l_idx is not None: sh.worksheet("Naplo").delete_rows(l_idx + 2)
-                        v_idx = next((idx for idx, row in enumerate(vez_data) if row.get('Hiba') == h_id), None)
-                        if v_idx is not None: sh.worksheet("Vezenylesek").delete_rows(v_idx + 2)
-                        st.cache_data.clear(); st.rerun()
-
-# ---------- TÉRKÉP ----------
+# ---------- TÉRKÉP (Szegély logika + Típus színek) ----------
 st.divider()
 st.subheader("📍 Helyszíni állapot")
 m = folium.Map(location=[47.1625, 19.5033], zoom_start=7)
@@ -173,12 +169,13 @@ for l in log_data:
         else: station_summary[s_name]["has_unplanned"] = True
 
 for s_name, info in station_summary.items():
-    # Szegély színe logika
+    # Szegély színe (Állapot)
     if info['has_back']: border_color = "yellow"
     elif info['has_planned'] and info['has_unplanned']: border_color = "brown"
-    elif info['has_planned']: border_color = "#27ae60" # sötétzöld
+    elif info['has_planned']: border_color = "#27ae60"
     else: border_color = "white"
 
+    # Belső szín (Márka)
     bg_color = "#27ae60" if info['type'] == "MOL" else "#e74c3c"
     
     icon_html = f'''
