@@ -5,7 +5,7 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 
-# ---------------- KONFIG ----------------
+# ================== KONFIG ==================
 st.set_page_config(layout="wide", page_title="Karbantartási Vezénylő")
 
 SCOPE = [
@@ -13,7 +13,7 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# ---------------- GOOGLE SHEETS ----------------
+# ================== GOOGLE SHEETS ==================
 @st.cache_resource
 def get_spreadsheet():
     creds = Credentials.from_service_account_info(
@@ -30,7 +30,7 @@ def load_data():
         "allomas": sh.worksheet("Allomasok").get_all_records(),
         "naplo": sh.worksheet("Naplo").get_all_records(),
         "technikus": sh.worksheet("Technikusok").get_all_records(),
-        "vezenyles": sh.worksheet("Vezenylesek").get_all_records()
+        "vezeny": sh.worksheet("Vezenylesek").get_all_records()
     }
 
 def run_and_refresh(func, *args):
@@ -38,84 +38,64 @@ def run_and_refresh(func, *args):
     st.cache_data.clear()
     st.rerun()
 
-# ---------------- ADATBETÖLTÉS ----------------
+# ================== ADATBETÖLTÉS ==================
 try:
-    sh = get_spreadsheet()
     data = load_data()
     allomasok = data["allomas"]
     naplo = data["naplo"]
     technikusok = data["technikus"]
 except Exception as e:
-    st.error(f"Adatbázis hiba: {e}")
+    st.error(f"❌ Adatbetöltési hiba: {e}")
     st.stop()
 
-# ---------------- SIDEBAR ----------------
-st.sidebar.title("🛠 Kezelőpanel")
+# ================== SIDEBAR ==================
+st.sidebar.title("⚙️ Kezelőpanel")
 
-# ---- ÚJ ÁLLOMÁS ----
 with st.sidebar.expander("➕ Új állomás felvétele"):
     with st.form("uj_allomas"):
         nev = st.text_input("Állomás neve")
-
-        lat = st.number_input(
-            "Szélesség (Latitude)",
-            format="%.6f",
-            value=47.650587
-        )
-
-        lon = st.number_input(
-            "Hosszúság (Longitude)",
-            format="%.6f",
-            value=19.725236
-        )
-
         tipus = st.selectbox("Típus", ["MOL", "ORLEN", "Egyéb"])
+        lat = st.text_input("Szélesség (pl. 47.650587)")
+        lon = st.text_input("Hosszúság (pl. 19.725236)")
 
         if st.form_submit_button("Mentés"):
-            if nev:
+            try:
+                lat = float(lat.replace(",", "."))
+                lon = float(lon.replace(",", "."))
                 run_and_refresh(
-                    sh.worksheet("Allomasok").append_row,
-                    [nev, float(lat), float(lon), tipus]
+                    get_spreadsheet().worksheet("Allomasok").append_row,
+                    [nev, lat, lon, tipus]
                 )
-            else:
-                st.warning("Állomás neve kötelező")
+                st.success("✅ Állomás mentve")
+            except Exception as e:
+                st.error(f"Hibás koordináta: {e}")
 
-# ---------------- TÉRKÉP ----------------
-st.title("📍 Állomások térképen")
+# ================== TÉRKÉP ==================
+st.header("🗺️ Állomások térképe")
 
-m = folium.Map(location=[47.2, 19.5], zoom_start=7)
+m = folium.Map(location=[47.5, 19.0], zoom_start=7)
 
 for a in allomasok:
     try:
-        lat = float(a["Szélesség"])
-        lon = float(a["Hosszúság"])
+        nev = a.get("Állomás neve") or a.get("Allomas neve") or "Ismeretlen"
+        lat = float(str(a.get("Szélesség", "")).replace(",", "."))
+        lon = float(str(a.get("Hosszúság", "")).replace(",", "."))
+
         folium.Marker(
             [lat, lon],
-            popup=f"{a['Állomás_Neve']} ({a.get('Típus','')})"
+            popup=nev,
+            icon=folium.Icon(color="blue", icon="info-sign")
         ).add_to(m)
     except:
         continue
 
 st_folium(m, width=1200, height=600)
 
-# ---------------- NAPLÓ ----------------
-st.divider()
+# ================== HIBÁK NAPLÓ ==================
 st.header("📒 Hibák napló")
 
-with st.form("uj_hiba"):
-    allomas_nev = st.selectbox(
-        "Állomás",
-        [a["Állomás_Neve"] for a in allomasok]
-    )
-    leiras = st.text_area("Hiba leírása")
+if naplo:
+    st.dataframe(naplo, use_container_width=True)
+else:
+    st.info("Nincs hiba rögzítve")
 
-    if st.form_submit_button("Hiba rögzítése"):
-        if leiras:
-            run_and_refresh(
-                sh.worksheet("Naplo").append_row,
-                [datetime.now().isoformat(), allomas_nev, leiras]
-            )
-        else:
-            st.warning("Leírás kötelező")
-
-st.dataframe(naplo)
