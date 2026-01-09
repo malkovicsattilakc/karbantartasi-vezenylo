@@ -35,7 +35,6 @@ def load_all_data():
             return pd.DataFrame()
         df = pd.DataFrame(records)
         df.columns = [str(c).strip() for c in df.columns]
-        # Hozzáadunk egy rejtett oszlopot a táblázatbeli sorszám követéséhez (1. sor a fejléc, így +2)
         df['_sheet_row'] = range(2, len(df) + 2)
         return df
 
@@ -56,6 +55,15 @@ def get_col(df, key, default):
 COL_A = get_col(data['naplo'], 'Állomás', "Állomás neve:")
 COL_S = get_col(data['naplo'], 'Státusz', "Státusz")
 
+# Aktív hibák kigyűjtése a szűréshez
+if not data['naplo'].empty and COL_S in data['naplo'].columns:
+    hibas_df_all = data['naplo'][data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni'])].copy()
+    # Azon állomások listája, ahol aktív hiba van
+    aktiv_hibas_allomasok = hibas_df_all[COL_A].unique().tolist()
+else:
+    hibas_df_all = pd.DataFrame()
+    aktiv_hibas_allomasok = []
+
 # -----------------------------
 # MENÜ KEZELÉS
 # -----------------------------
@@ -71,35 +79,29 @@ active_menu = "Vezénylés" if st.session_state.edit_target else menu
 if active_menu == "Műszerfal & Térkép":
     st.title("🛠️ Feladatkezelő és Műszerfal")
     
-    naplo = data['naplo']
-    if not naplo.empty and COL_S in naplo.columns:
-        # Csak a nyitott és visszamenős hibák
-        hibas_df = naplo[naplo[COL_S].isin(['Nyitott', 'Visszamenni'])].copy()
-        
-        # Dátum szerinti rendezés (átalakítás rendezhető formátumra)
-        hibas_df['dt_temp'] = pd.to_datetime(hibas_df['Dátum'], errors='coerce')
-        hibas_df = hibas_df.sort_values('dt_temp', ascending=True)
+    if not hibas_df_all.empty:
+        # Időrendi rendezés
+        hibas_df_all['dt_temp'] = pd.to_datetime(hibas_df_all['Dátum'], errors='coerce')
+        hibas_df_sorted = hibas_df_all.sort_values('dt_temp', ascending=True)
     else:
-        hibas_df = pd.DataFrame()
+        hibas_df_sorted = pd.DataFrame()
 
-    st.subheader(f"📅 Aktuális munkák időrendben ({len(hibas_df)} db)")
+    st.subheader(f"📅 Aktuális munkák időrendben ({len(hibas_df_sorted)} db)")
 
-    if not hibas_df.empty:
-        # Táblázat fejléce
+    if not hibas_df_sorted.empty:
         h = st.columns([2, 2, 2.5, 2, 3])
         h[0].write("**Határidő**"); h[1].write("**Helyszín**"); h[2].write("**Feladat**"); h[3].write("**Technikus**"); h[4].write("**Műveletek**")
         st.divider()
 
-        for _, row in hibas_df.iterrows():
+        for _, row in hibas_df_sorted.iterrows():
             c = st.columns([2, 2, 2.5, 2, 3])
             all_name = row[COL_A]
-            s_row = row['_sheet_row'] # Ez a valódi sorszám a Google Sheets-ben
+            s_row = row['_sheet_row']
             
             c[0].write(f"⏰ {row['Dátum']}")
             c[1].write(all_name)
             c[2].write(row.get('Hiba leírása', '---'))
             
-            # Ütemezés keresése
             v_info = data['vez'][data['vez']['Allomas_Neve'] == all_name] if not data['vez'].empty else pd.DataFrame()
             is_sched = not v_info.empty
             if is_sched:
@@ -108,23 +110,15 @@ if active_menu == "Műszerfal & Térkép":
             else:
                 c[3].write("---")
 
-            # Gombok
             b = c[4].columns(4)
-            if b[0].button("✅", key=f"k_{s_row}", help="Kész"):
+            if b[0].button("✅", key=f"k_{s_row}"):
                 sheet_naplo.update_cell(s_row, 4, "Kész"); st.rerun()
-            if b[1].button("🔄", key=f"v_{s_row}", help="Visszamenni"):
+            if b[1].button("🔄", key=f"v_{s_row}"):
                 sheet_naplo.update_cell(s_row, 4, "Visszamenni"); st.rerun()
-            if is_sched and b[2].button("📝", key=f"e_{s_row}", help="Módosít"):
+            if is_sched and b[2].button("📝", key=f"e_{s_row}"):
                 st.session_state.edit_target = all_name; st.rerun()
-            
-            # TÖRLÉS: A Naplóból és a Vezénylésből is töröl
-            if b[3].button("🗑️", key=f"t_{s_row}", help="Végleges törlés"):
+            if b[3].button("🗑️", key=f"t_{s_row}"):
                 sheet_naplo.delete_rows(s_row)
-                # Vezénylés törlése ha van
-                try:
-                    cells = sheet_vez.findall(all_name)
-                    for cell in reversed(cells): sheet_vez.delete_rows(cell.row)
-                except: pass
                 st.rerun()
     else:
         st.info("Nincs rögzített aktív feladat.")
@@ -136,7 +130,7 @@ if active_menu == "Műszerfal & Térkép":
         m_df['Lat'] = pd.to_numeric(m_df['Lat'], errors='coerce')
         m_df['Lon'] = pd.to_numeric(m_df['Lon'], errors='coerce')
         m_df = m_df.dropna(subset=['Lat', 'Lon'])
-        m_df['hibak'] = m_df['Nev'].apply(lambda x: len(hibas_df[hibas_df[COL_A] == x]) if not hibas_df.empty else 0)
+        m_df['hibak'] = m_df['Nev'].apply(lambda x: len(hibas_df_sorted[hibas_df_sorted[COL_A] == x]) if not hibas_df_sorted.empty else 0)
         p_df = m_df[m_df['hibak'] > 0]
         if not p_df.empty:
             st.pydeck_chart(pdk.Deck(
@@ -149,7 +143,7 @@ if active_menu == "Műszerfal & Térkép":
             ))
 
 # -----------------------------
-# 2. HIBA RÖGZÍTÉSE (HATÁRIDŐVEL)
+# 2. HIBA RÖGZÍTÉSE
 # -----------------------------
 elif active_menu == "Hiba rögzítése":
     st.title("🐞 Új hiba és határidő")
@@ -168,27 +162,41 @@ elif active_menu == "Hiba rögzítése":
             else: st.error("Tölts ki minden mezőt!")
 
 # -----------------------------
-# 3. VEZÉNYLÉS / MÓDOSÍTÁS
+# 3. VEZÉNYLÉS (SZŰRT LISTÁVAL)
 # -----------------------------
 elif active_menu == "Vezénylés":
     target = st.session_state.edit_target
     st.title("📋 " + ("Ütemezés módosítása" if target else "Technikus kirendelése"))
-    with st.form("v_form"):
-        techs = data['tech']['Név'].tolist() if not data['tech'].empty else []
-        alls = data['allomasok']['Nev'].tolist() if not data['allomasok'].empty else []
-        t_tech = st.selectbox("Technikus", techs)
-        t_all = st.selectbox("Helyszín", alls, index=alls.index(target) if target in alls else 0)
-        t_date = st.date_input("Dátum", date.today())
-        t_time = st.time_input("Időpont", time(8, 0))
-        if st.form_submit_button("Mentés"):
-            if target: # Régi törlése módosításkor
-                try:
-                    cells = sheet_vez.findall(target)
-                    for cell in reversed(cells): sheet_vez.delete_rows(cell.row)
-                except: pass
-            sheet_vez.append_row([t_tech, t_all, f"{t_date} {t_time.strftime('%H:%M')}", "Ütemezve"])
-            st.session_state.edit_target = None
-            st.success("Sikeres vezénylés!"); st.rerun()
+    
+    # Ha nincs aktív hiba, figyelmeztetünk
+    if not aktiv_hibas_allomasok and not target:
+        st.warning("Nincs olyan állomás, ahol aktív hiba lenne, ezért nem lehet vezényelni. Rögzíts előbb egy hibát!")
+    else:
+        with st.form("v_form"):
+            techs = data['tech']['Név'].tolist() if not data['tech'].empty else []
+            
+            # CSAK AZ AKTÍV HIBÁS ÁLLOMÁSOK MEGJELENÍTÉSE
+            # Ha módosítás van, akkor a módosítandót is hozzáadjuk, ha véletlenül nem lenne benne
+            if target and target not in aktiv_hibas_allomasok:
+                display_alls = [target] + aktiv_hibas_allomasok
+            else:
+                display_alls = aktiv_hibas_allomasok
+            
+            t_tech = st.selectbox("Technikus", techs)
+            t_all = st.selectbox("Helyszín (Csak aktív hibák!)", display_alls, index=display_alls.index(target) if target in display_alls else 0)
+            t_date = st.date_input("Dátum", date.today())
+            t_time = st.time_input("Időpont", time(8, 0))
+            
+            if st.form_submit_button("Mentés"):
+                if target: # Régi ütemezés törlése
+                    try:
+                        cells = sheet_vez.findall(target)
+                        for cell in reversed(cells): sheet_vez.delete_rows(cell.row)
+                    except: pass
+                sheet_vez.append_row([t_tech, t_all, f"{t_date} {t_time.strftime('%H:%M')}", "Ütemezve"])
+                st.session_state.edit_target = None
+                st.success("Sikeres vezénylés!"); st.rerun()
+
     if target and st.button("Mégse"):
         st.session_state.edit_target = None; st.rerun()
 
