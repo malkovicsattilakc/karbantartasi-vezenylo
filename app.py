@@ -25,8 +25,8 @@ gc = gspread.authorize(creds)
 # ======================
 SPREADSHEET_NAME = "Terkep_Adatbazis"
 
-sh = gc.open(SPREADSHEET_NAME)
-sheet_allomasok = sh.worksheet("Allomasok")
+SPREADSHEET_ID = "1-kng7w3h8Us6Xr93Nk1kJ8zwuSocCadqJvyxpb7mhas"
+sh = gc.open_by_key(SPREADSHEET_ID)
 sheet_naplo = sh.worksheet("Naplo")
 sheet_tech = sh.worksheet("Technikusok")
 sheet_vez = sh.worksheet("Vezenylesek")
@@ -181,3 +181,4 @@ for n in naplo:
     ).add_to(m)
 
 st_folium(m, height=500)
+
