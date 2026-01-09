@@ -62,44 +62,73 @@ menu = st.sidebar.radio("Menü", ["Térkép", "Állomás létrehozása", "Hiba r
 if menu == "Térkép":
     st.subheader("📝 Nyitott hibák")
     if naplo:
-        # A te táblázatodban: "Státusz"
         nyitott = [n for n in naplo if str(n.get("Státusz")).strip() == "Nyitott"]
         if nyitott:
             for n in nyitott:
-                # Kijelezzük a fontosabb infókat
                 st.warning(f"⚠️ **{n.get('Állomás neve:', 'Ismeretlen')}**: {n.get('Hiba leírása')} (Bejelentve: {n.get('Dátum')})")
         else:
             st.success("Nincs nyitott hiba!")
     else:
         st.info("A hibanapló üres.")
 
-    st.subheader("📍 Állomások térképen")
+    st.subheader("📍 Térkép")
     if allomasok:
         df = pd.DataFrame(allomasok)
-        # Oszlopneveid: Lat, Lon
         df["Lat"] = pd.to_numeric(df["Lat"], errors="coerce")
         df["Lon"] = pd.to_numeric(df["Lon"], errors="coerce")
         df = df.dropna(subset=["Lat", "Lon"])
         
         if not df.empty:
+            # Itt korábban a ScatterplotLayer (piros pöttyök) volt. 
+            # Ezt most kivettem (layers=[]), így csak az alap térkép látszik.
             st.pydeck_chart(pdk.Deck(
-                map_style='mapbox://styles/mapbox/dark-v10',
-                initial_view_state=pdk.ViewState(latitude=df["Lat"].mean(), longitude=df["Lon"].mean(), zoom=7),
-                layers=[pdk.Layer("ScatterplotLayer", data=df, get_position="[Lon, Lat]", get_radius=3000, get_fill_color=[255, 0, 0, 160], pickable=True)]
+                map_style='mapbox://styles/mapbox/light-v10', # Világosabb térkép stílus
+                initial_view_state=pdk.ViewState(
+                    latitude=df["Lat"].mean(), 
+                    longitude=df["Lon"].mean(), 
+                    zoom=7
+                ),
+                layers=[] # Eltávolítva a piros pöttyök
             ))
         else:
-            st.info("Nincs koordináta az állomásokhoz.")
+            st.info("Nincs megjeleníthető állomás.")
 
 # -----------------------------
-# HIBA RÖGZÍTÉSE
+# ÁLLOMÁS LÉTREHOZÁSA (Legördülő típussal)
+# -----------------------------
+elif menu == "Állomás létrehozása":
+    st.subheader("➕ Új állomás rögzítése")
+    with st.form("allomas_form"):
+        nev = st.text_input("Állomás neve")
+        
+        # LEGÖRDÜLŐ LISTA A TÍPUSHOZ
+        tipus = st.selectbox("Típus (C oszlop)", ["MOL", "ORLEN", "Egyéb"])
+        
+        lat = st.text_input("Szélesség (Lat)")
+        lon = st.text_input("Hosszúság (Lon)")
+        
+        if st.form_submit_button("Mentés"):
+            uj_id = len(allomasok) + 1
+            sheet_allomasok.append_row([uj_id, nev, tipus, lat, lon])
+            st.success(f"'{nev}' ({tipus}) állomás mentve!")
+            st.cache_data.clear()
+
+# -----------------------------
+# HIBA RÖGZÍTÉSE (Márka megjelenítésével)
 # -----------------------------
 elif menu == "Hiba rögzítése":
     st.subheader("🐞 Új hiba bejelentése")
-    # Oszlopneved: Nev
-    allomas_nevek = [a.get("Nev", "Névtelen") for a in allomasok]
+    
+    # Itt kombináljuk a Nev-et és a Tipus-t (C oszlop) a választáshoz
+    allomas_valasztek = {
+        f"{a.get('Nev')} - {a.get('Tipus')}": a.get('Nev') 
+        for a in allomasok
+    }
     
     with st.form("hiba_form"):
-        allomas = st.selectbox("Állomás kiválasztása", allomas_nevek)
+        valasztott_megjelenites = st.selectbox("Állomás kiválasztása", list(allomas_valasztek.keys()))
+        allomas_neve = allomas_valasztek[valasztott_megjelenites]
+        
         hiba_leiras = st.text_area("Hiba leírása")
         
         st.write("⌛ **Határidő beállítása:**")
@@ -111,18 +140,16 @@ elif menu == "Hiba rögzítése":
         
         if submit:
             hatarido_szoveg = f"{h_datum} {h_ido.strftime('%H:%M')}"
-            # Oszlopok a Naplo-ban: Dátum, Állomás neve:, Hiba leírása, Státusz, Technikus
-            # Megjegyzés: A határidőt a "Hiba leírása" végéhez fűzöm, mert nincs külön oszlopod neki
             teljes_leiras = f"{hiba_leiras} | HATÁRIDŐ: {hatarido_szoveg}"
             
             sheet_naplo.append_row([
                 str(date.today()), 
-                allomas, 
+                allomas_neve, 
                 teljes_leiras, 
                 "Nyitott", 
-                "" # Technikus üresen marad rögzítéskor
+                ""
             ])
-            st.success("Hiba rögzítve!")
+            st.success(f"Hiba rögzítve az alábbi állomáshoz: {valasztott_megjelenites}")
             st.cache_data.clear()
 
 # -----------------------------
@@ -130,7 +157,6 @@ elif menu == "Hiba rögzítése":
 # -----------------------------
 elif menu == "Vezénylés":
     st.subheader("📋 Technikus vezénylése")
-    # Oszlopneveid: Név (Technikusok), Nev (Allomasok)
     tech_nevek = [t.get("Név", "Névtelen") for t in technikusok]
     allomas_nevek = [a.get("Nev", "Névtelen") for a in allomasok]
 
@@ -143,30 +169,6 @@ elif menu == "Vezénylés":
         submit = st.form_submit_button("Vezénylés mentése")
         
         if submit:
-            # Oszlopok a Vezenylesek-ben: Technikus_Neve, Allomas_Neve, Datum, Hiba
-            sheet_vez.append_row([
-                tech, 
-                allomas, 
-                str(kivonulas_nap), 
-                feladat
-            ])
-            st.success("Vezénylés rögzítve a táblázatba!")
-            st.cache_data.clear()
-
-# -----------------------------
-# ÁLLOMÁS LÉTREHOZÁSA
-# -----------------------------
-elif menu == "Állomás létrehozása":
-    st.subheader("➕ Új állomás rögzítése")
-    with st.form("allomas_form"):
-        nev = st.text_input("Állomás neve")
-        tipus = st.text_input("Típus")
-        lat = st.text_input("Szélesség (Lat)")
-        lon = st.text_input("Hosszúság (Lon)")
-        
-        if st.form_submit_button("Mentés"):
-            # Oszlopok: ID, Nev, Tipus, Lat, Lon
-            uj_id = len(allomasok) + 1
-            sheet_allomasok.append_row([uj_id, nev, tipus, lat, lon])
-            st.success(f"'{nev}' állomás mentve!")
+            sheet_vez.append_row([tech, allomas, str(kivonulas_nap), feladat])
+            st.success("Vezénylés rögzítve!")
             st.cache_data.clear()
