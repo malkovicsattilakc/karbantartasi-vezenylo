@@ -6,7 +6,7 @@ import pydeck as pdk
 from datetime import datetime, date, time
 
 # -----------------------------
-# KONFIGURÁCIÓ ÉS CSATLAKOZÁS
+# KONFIGURÁCIÓ
 # -----------------------------
 SPREADSHEET_ID = "1-kng7w3h8Us6Xr93Nk1kJ8zwuSocCadqJvyxpb7mhas"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -14,15 +14,10 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 st.set_page_config(page_title="Karbantartási vezénylő", layout="wide")
 
 # Google Auth
-if "gcp_service_account" not in st.secrets:
-    st.error("Hiányzik a 'gcp_service_account' konfiguráció!")
-    st.stop()
-
 creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
 
-# Munkalapok elérése
 sheet_naplo = sh.worksheet("Naplo")
 sheet_vez = sh.worksheet("Vezenylesek")
 sheet_allomasok = sh.worksheet("Allomasok")
@@ -51,164 +46,145 @@ COL_A = data["cols"]["allomas"]
 COL_S = data["cols"]["statusz"]
 
 # -----------------------------
-# MENÜ (Visszahozva minden funkció)
+# MENÜ ÉS MODOSÍTÁS KEZELÉS
 # -----------------------------
+if 'edit_mode' not in st.session_state:
+    st.session_state.edit_mode = None
+
 menu = st.sidebar.radio("Menü", ["Műszerfal & Térkép", "Hiba rögzítése", "Vezénylés", "Új állomás felvitele"])
 
 # -----------------------------
-# 1. MŰSZERFAL & TÉRKÉP (A régi jó térképpel)
+# 1. MŰSZERFAL & TÉRKÉP
 # -----------------------------
 if menu == "Műszerfal & Térkép":
     st.title("🛠️ Karbantartási vezénylő")
     
-    # Hibalista megjelenítése felül
     hibas_df = data['naplo'][data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni'])]
     st.subheader(f"📝 Aktuális hibaállapotok ({len(hibas_df)} db)")
 
     if not hibas_df.empty:
-        header = st.columns([1.5, 2, 2.5, 2, 2.5])
+        header = st.columns([1.5, 2, 2.5, 2, 3])
         header[0].write("**Dátum**"); header[1].write("**Állomás**"); header[2].write("**Hiba**"); header[3].write("**Ütemezés**"); header[4].write("**Műveletek**")
         st.divider()
 
         for idx, row in hibas_df.iterrows():
-            c = st.columns([1.5, 2, 2.5, 2, 2.5])
+            c = st.columns([1.5, 2, 2.5, 2, 3])
             all_name = row[COL_A]
             c[0].write(row['Dátum'])
             c[1].write(all_name)
             c[2].write(row['Hiba leírása'])
             
-            # Ütemezési infó (Vezénylések lapról)
             v_info = data['vez'][data['vez']['Allomas_Neve'] == all_name]
-            if not v_info.empty:
+            is_scheduled = not v_info.empty
+            
+            if is_scheduled:
                 v_l = v_info.iloc[-1]
                 c[3].info(f"👤 {v_l['Technikus_Neve']}\n📅 {v_l['Datum']}")
             else:
                 c[3].write("---")
 
-            b_cols = c[4].columns(3)
-            if b_cols[0].button("✅", key=f"k_{idx}"):
+            b_cols = c[4].columns(4)
+            if b_cols[0].button("✅", key=f"k_{idx}", help="Kész"):
                 sheet_naplo.update_cell(idx + 2, 4, "Kész")
-                st.cache_data.clear()
                 st.rerun()
-            if b_cols[1].button("🔄", key=f"v_{idx}"):
+            if b_cols[1].button("🔄", key=f"v_{idx}", help="Visszamenni"):
                 sheet_naplo.update_cell(idx + 2, 4, "Visszamenni")
-                st.cache_data.clear()
+                st.rerun()
+            if is_scheduled:
+                if b_cols[2].button("📝", key=f"e_{idx}", help="Ütemezés módosítása"):
+                    st.session_state.edit_mode = all_name
+                    st.sidebar.warning(f"Szerkesztés: {all_name}")
+            if b_cols[3].button("🗑️", key=f"d_{idx}", help="Ütemezés törlése"):
+                cells = sheet_vez.findall(all_name)
+                for cell in reversed(cells): sheet_vez.delete_rows(cell.row)
                 st.rerun()
 
-    # TÉRKÉP (Visszaállítva a kezdeti jó verzióra)
-    st.subheader("📍 Állomások térképen")
+    # TÉRKÉP JAVÍTÁSA
+    st.subheader("📍 Térkép (Csak aktív hibák)")
     map_df = data['allomasok'].copy()
     map_df['Lat'] = pd.to_numeric(map_df['Lat'], errors='coerce')
     map_df['Lon'] = pd.to_numeric(map_df['Lon'], errors='coerce')
     map_df = map_df.dropna(subset=['Lat', 'Lon'])
 
-    if not map_df.empty:
-        # Meghatározzuk a színeket és hibaszámokat
-        map_df['hibak_szama'] = map_df['Nev'].apply(lambda x: len(data['naplo'][(data['naplo'][COL_A] == x) & (data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni']))]))
-        
-        def get_map_colors(r):
+    # Szűrés: Csak az állomások, ahol van nyitott hiba
+    map_df['hibak_szama'] = map_df['Nev'].apply(lambda x: len(data['naplo'][(data['naplo'][COL_A] == x) & (data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni']))]))
+    plot_df = map_df[map_df['hibak_szama'] > 0].copy()
+
+    if not plot_df.empty:
+        def get_map_logic(r):
             h = data['naplo'][data['naplo'][COL_A] == r['Nev']]
             v = data['vez'][data['vez']['Allomas_Neve'] == r['Nev']]
-            
-            # Belső szín (Státusz alapú)
-            if not v.empty: fill = [0, 255, 0, 160] # Zöld (Ütemezve)
-            elif "Visszamenni" in h[COL_S].values: fill = [255, 255, 0, 160] # Sárga
-            elif not h.empty: fill = [255, 0, 0, 160] # Piros (Nyitott hiba)
-            else: fill = [200, 200, 200, 50] # Szürke (Nincs hiba)
-            
-            # Keretszín (Márka alapú)
-            if r['Tipus'] == "MOL": line = [0, 255, 0]
-            elif r['Tipus'] == "ORLEN": line = [255, 0, 0]
-            else: line = [0, 191, 255]
-            
-            return pd.Series([fill, line])
+            if not v.empty: f = [0, 255, 0, 200]
+            elif "Visszamenni" in h[COL_S].values: f = [255, 255, 0, 200]
+            else: f = [255, 0, 0, 200]
+            l = [0, 255, 0] if r['Tipus'] == "MOL" else ([255, 0, 0] if r['Tipus'] == "ORLEN" else [0, 191, 255])
+            return pd.Series([f, l])
 
-        map_df[['f_color', 'l_color']] = map_df.apply(get_map_colors, axis=1)
+        plot_df[['f_c', 'l_c']] = plot_df.apply(get_map_logic, axis=1)
 
         st.pydeck_chart(pdk.Deck(
             map_style='mapbox://styles/mapbox/dark-v10',
-            initial_view_state=pdk.ViewState(latitude=map_df['Lat'].mean(), longitude=map_df['Lon'].mean(), zoom=7),
+            initial_view_state=pdk.ViewState(latitude=plot_df['Lat'].mean(), longitude=plot_df['Lon'].mean(), zoom=7),
             layers=[
-                pdk.Layer(
-                    "ScatterplotLayer", map_df, get_position="[Lon, Lat]",
-                    get_fill_color="f_color", get_line_color="l_color",
-                    line_width_min_pixels=3, get_radius=5000, pickable=True
-                ),
-                pdk.Layer(
-                    "TextLayer", map_df[map_df['hibak_szama'] > 0], get_position="[Lon, Lat]",
-                    get_text="hibak_szama", get_size=20, get_color=[255, 255, 255]
-                )
+                pdk.Layer("ScatterplotLayer", plot_df, get_position="[Lon, Lat]", get_fill_color="f_c", get_line_color="l_c", line_width_min_pixels=3, get_radius=5000, pickable=True),
+                pdk.Layer("TextLayer", plot_df, get_position="[Lon, Lat]", get_text="hibak_szama", get_size=24, get_color=[0, 0, 0], get_alignment_baseline="'center'")
             ]
         ))
 
 # -----------------------------
-# 2. HIBA RÖGZÍTÉSE
+# 2. VEZÉNYLÉS / MÓDOSÍTÁS
+# -----------------------------
+elif menu == "Vezénylés" or st.session_state.edit_mode:
+    target = st.session_state.edit_mode if st.session_state.edit_mode else None
+    st.title("📋 " + ("Ütemezés módosítása" if target else "Technikus kirendelése"))
+    
+    with st.form("vez_form"):
+        tech_list = data['tech']['Név'].tolist()
+        all_list = data['allomasok']['Nev'].tolist()
+        
+        # Ha szerkesztünk, az állomás fix
+        default_idx = all_list.index(target) if target in all_list else 0
+        
+        tech = st.selectbox("Technikus", tech_list)
+        hely = st.selectbox("Helyszín", all_list, index=default_idx, disabled=(target is not None))
+        mikor = st.date_input("Dátum", date.today())
+        feladat = st.text_area("Leírás", "Módosított ütemezés" if target else "")
+        
+        if st.form_submit_button("Mentés"):
+            if target: # Régi törlése módosításkor
+                cells = sheet_vez.findall(target)
+                for cell in reversed(cells): sheet_vez.delete_rows(cell.row)
+            
+            sheet_vez.append_row([tech, hely if not target else target, str(mikor), feladat])
+            st.session_state.edit_mode = None
+            st.success("Sikeres mentés!")
+            st.rerun()
+    
+    if target and st.button("Mégse"):
+        st.session_state.edit_mode = None
+        st.rerun()
+
+# -----------------------------
+# 3. HIBA RÖGZÍTÉSE
 # -----------------------------
 elif menu == "Hiba rögzítése":
     st.title("🐞 Új hiba bejelentése")
-    with st.form("hiba_form"):
-        # Cím kiválasztása márka megjelenítésével
+    with st.form("h_form"):
         options = {f"{r['Nev']} ({r['Tipus']})": r['Nev'] for _, r in data['allomasok'].iterrows()}
-        valasztott_cim = st.selectbox("Állomás kiválasztása", list(options.keys()))
-        hiba_leiras = st.text_area("Hiba leírása")
-        
-        col1, col2 = st.columns(2)
-        h_datum = col1.date_input("Határidő nap", date.today())
-        h_ido = col2.time_input("Pontos idő", time(12, 0))
-        
-        if st.form_submit_button("Hiba mentése"):
-            sheet_naplo.append_row([
-                str(date.today()), 
-                options[valasztott_cim], 
-                f"{hiba_leiras} | HATÁRIDŐ: {h_datum} {h_ido.strftime('%H:%M')}", 
-                "Nyitott", ""
-            ])
-            st.success("Hiba rögzítve a naplóba!")
-            st.cache_data.clear()
+        val_cim = st.selectbox("Állomás", list(options.keys()))
+        leiras = st.text_area("Hiba leírása")
+        if st.form_submit_button("Mentés"):
+            sheet_naplo.append_row([str(date.today()), options[val_cim], leiras, "Nyitott", ""])
+            st.success("Hiba rögzítve!")
 
 # -----------------------------
-# 3. VEZÉNYLÉS (Szűrt lista megoldva)
-# -----------------------------
-elif menu == "Vezénylés":
-    st.title("📋 Technikus kirendelése")
-    
-    # Csak hibahelyszínekre küldés szűrő az oldalsávon vagy itt
-    free_send = st.checkbox("Nem aktív hiba küldés (Összes állomás mutatása)")
-    
-    hibas_helyszinek = data['naplo'][data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni'])][COL_A].unique().tolist()
-    osszes_helyszin = data['allomasok']['Nev'].tolist()
-    
-    valaszthato_cimek = osszes_helyszin if free_send else hibas_helyszinek
-
-    if not valaszthato_cimek and not free_send:
-        st.warning("Jelenleg nincs nyitott hiba. Pipáld be a fenti gombot az összes állomás listázásához.")
-    else:
-        with st.form("vez_form"):
-            tech = st.selectbox("Technikus", data['tech']['Név'].tolist())
-            hely = st.selectbox("Célállomás", valaszthato_cimek)
-            mikor = st.date_input("Kivonulás napja", date.today())
-            feladat = st.text_area("Munka leírása")
-            
-            if st.form_submit_button("Vezénylés rögzítése"):
-                sheet_vez.append_row([tech, hely, str(mikor), feladat])
-                st.success(f"{tech} kirendelve: {hely}")
-                st.cache_data.clear()
-
-# -----------------------------
-# 4. ÚJ ÁLLOMÁS FELVITELE
+# 4. ÚJ ÁLLOMÁS
 # -----------------------------
 elif menu == "Új állomás felvitele":
-    st.title("➕ Új állomás rögzítése")
-    with st.form("uj_all_form"):
-        nev = st.text_input("Állomás neve")
-        tipus = st.selectbox("Típus", ["MOL", "ORLEN", "Egyéb"])
-        lat = st.text_input("Szélesség (Lat) - pl: 47.123")
-        lon = st.text_input("Hosszúság (Lon) - pl: 19.123")
-        
-        if st.form_submit_button("Állomás mentése"):
-            if nev and lat and lon:
-                sheet_allomasok.append_row([len(data['allomasok'])+1, nev, tipus, lat, lon])
-                st.success(f"'{nev}' sikeresen hozzáadva!")
-                st.cache_data.clear()
-            else:
-                st.error("Kérlek tölts ki minden mezőt!")
+    st.title("➕ Új állomás")
+    with st.form("a_form"):
+        n = st.text_input("Név"); t = st.selectbox("Típus", ["MOL", "ORLEN", "Egyéb"])
+        la = st.text_input("Lat"); lo = st.text_input("Lon")
+        if st.form_submit_button("Mentés"):
+            sheet_allomasok.append_row([len(data['allomasok'])+1, n, t, la, lo])
+            st.success("Állomás mentve!")
