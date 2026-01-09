@@ -49,12 +49,11 @@ def find_col(df, target):
 
 COL_A = find_col(data['naplo'], "Állomás")
 COL_S = find_col(data['naplo'], "Státusz")
-COL_T = find_col(data['naplo'], "Hibajegyszám") # Új oszlop
+COL_T = find_col(data['naplo'], "Hibajegyszám")
 
 # Aktív hibák szűrése
 hibas_df = data['naplo'][data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni'])].copy() if not data['naplo'].empty else pd.DataFrame()
 
-# Segédfüggvény a hiba nevének szép megjelenítéséhez
 def get_task_label(row):
     ticket = f"[{row[COL_T]}] " if COL_T in row and str(row[COL_T]).strip() else ""
     return f"{row[COL_A]} | {ticket}{row['Hiba leírása']}"
@@ -64,7 +63,7 @@ def get_task_label(row):
 # -----------------------------
 if 'edit_row_id' not in st.session_state: st.session_state.edit_row_id = None
 
-menu = st.sidebar.radio("Menü", ["Műszerfal & Térkép", "Hiba rögzítése", "Vezénylés", "Új állomás"])
+menu = st.sidebar.radio("Menü", ["Műszerfal & Térkép", "Hiba rögzítése", "Vezénylés", "Új állomás felvitele"])
 active_menu = "Vezénylés" if st.session_state.edit_row_id else menu
 
 # -----------------------------
@@ -74,42 +73,54 @@ if active_menu == "Műszerfal & Térkép":
     st.title("🛠️ Operatív Irányítópult")
     
     if not hibas_df.empty:
+        # Időbélyeg kinyerése a rendezéshez (feltételezzük: "YYYY-MM-DD HH:MM")
         hibas_df['dt_temp'] = pd.to_datetime(hibas_df['Dátum'], errors='coerce')
+        hibas_df['only_date'] = hibas_df['dt_temp'].dt.date
         hibas_df = hibas_df.sort_values('dt_temp')
         
-        for d_str, day_group in hibas_df.groupby('Dátum', sort=False):
-            st.markdown(f"#### 📅 {d_str}")
-            cols = st.columns(3)
-            for i, (_, row) in enumerate(day_group.iterrows()):
-                with cols[i % 3]:
-                    # Hibajegy megjelenítése
-                    ticket_prefix = f"**{row[COL_T]}** - " if COL_T in row and row[COL_T] else ""
+        unique_dates = hibas_df['only_date'].dropna().unique()
+        
+        # Napok egymás mellett (Oszlopok)
+        if len(unique_dates) > 0:
+            date_cols = st.columns(len(unique_dates))
+            
+            for idx, d_val in enumerate(unique_dates):
+                with date_cols[idx]:
+                    st.markdown(f"### 📅 {d_val}")
+                    day_tasks = hibas_df[hibas_df['only_date'] == d_val]
                     
-                    st.info(f"📍 **{row[COL_A]}**")
-                    st.write(f"{ticket_prefix}{row['Hiba leírása']}")
-                    
-                    # Vezénylés keresése (Állomás ÉS Hiba alapján)
-                    v_info = data['vez'][(data['vez']['Allomas_Neve'] == row[COL_A]) & 
-                                         (data['vez']['Feladat'] == row['Hiba leírása'])] if not data['vez'].empty else pd.DataFrame()
-                    
-                    if not v_info.empty:
-                        lv = v_info.iloc[-1]
-                        st.success(f"👤 {lv['Technikus_Neve']} | 📅 {lv['Datum']}")
-                    else:
-                        st.warning("❌ Nincs ütemezve")
-                    
-                    b1, b2, b3 = st.columns(3)
-                    if b1.button("✅", key=f"ok_{row['_sheet_row']}"):
-                        sheet_naplo.update_cell(row['_sheet_row'], 4, "Kész")
-                        st.rerun()
-                    if b2.button("📝", key=f"ed_{row['_sheet_row']}"):
-                        st.session_state.edit_row_id = row['_sheet_row']
-                        st.rerun()
-                    if b3.button("🔄", key=f"re_{row['_sheet_row']}"):
-                        sheet_naplo.update_cell(row['_sheet_row'], 4, "Visszamenni"); st.rerun()
-            st.divider()
-
-    # TÉRKÉP (A kért színezési logikával)
+                    # Adott napon belüli időpontok egymás alatt
+                    for _, row in day_tasks.iterrows():
+                        ticket_prefix = f"**{row[COL_T]}** - " if COL_T in row and row[COL_T] else ""
+                        
+                        # Kártya jellegű megjelenítés
+                        with st.container(border=True):
+                            st.write(f"⏰ {row['Dátum'].split(' ')[1] if ' ' in str(row['Dátum']) else row['Dátum']}")
+                            st.markdown(f"📍 **{row[COL_A]}**")
+                            st.write(f"{ticket_prefix}{row['Hiba leírása']}")
+                            
+                            v_info = data['vez'][(data['vez']['Allomas_Neve'] == row[COL_A]) & 
+                                                 (data['vez']['Feladat'] == row['Hiba leírása'])] if not data['vez'].empty else pd.DataFrame()
+                            
+                            if not v_info.empty:
+                                lv = v_info.iloc[-1]
+                                st.success(f"👤 {lv['Technikus_Neve']}\n📅 {lv['Datum']}")
+                            else:
+                                st.warning("❌ Nincs ütemezve")
+                            
+                            b1, b2, b3 = st.columns(3)
+                            if b1.button("✅", key=f"ok_{row['_sheet_row']}"):
+                                sheet_naplo.update_cell(row['_sheet_row'], 4, "Kész")
+                                st.rerun()
+                            if b2.button("📝", key=f"ed_{row['_sheet_row']}"):
+                                st.session_state.edit_row_id = row['_sheet_row']
+                                st.rerun()
+                            if b3.button("🔄", key=f"re_{row['_sheet_row']}"):
+                                sheet_naplo.update_cell(row['_sheet_row'], 4, "Visszamenni")
+                                st.rerun()
+    
+    st.divider()
+    # TÉRKÉP
     st.subheader("📍 Hálózati térkép")
     m_df = data['allomasok'].copy()
     if not m_df.empty and 'Lat' in m_df.columns:
@@ -121,21 +132,15 @@ if active_menu == "Műszerfal & Térkép":
             h_list = hibas_df[hibas_df[COL_A] == r['Nev']]
             h_count = len(h_list)
             if h_count == 0: return pd.Series([[200, 200, 200, 30], [100, 100, 100], 0])
-            
-            # Keret: MOL=Zöld, ORLEN=Piros, Egyéb=Kék
             brand = str(r.get('Tipus', '')).upper()
             l_color = [0, 255, 0] if "MOL" in brand else ([255, 0, 0] if "ORLEN" in brand else [0, 191, 255])
-            
-            # Kitöltés: Ütemezett=Zöld, Nincs=Piros, Visszamenni=Sárga, Visszamenni+Nincs=Barna
             v_all = data['vez'][data['vez']['Allomas_Neve'] == r['Nev']] if not data['vez'].empty else pd.DataFrame()
             is_scheduled = not v_all.empty
             has_return = any(h_list[COL_S] == "Visszamenni")
-            
-            if has_return and not is_scheduled: f_color = [139, 69, 19, 230] # Barna
-            elif is_scheduled: f_color = [0, 255, 0, 200]                   # Zöld
-            elif has_return: f_color = [255, 255, 0, 200]                   # Sárga
-            else: f_color = [255, 0, 0, 200]                                # Piros
-                
+            if has_return and not is_scheduled: f_color = [139, 69, 19, 230]
+            elif is_scheduled: f_color = [0, 255, 0, 200]
+            elif has_return: f_color = [255, 255, 0, 200]
+            else: f_color = [255, 0, 0, 200]
             return pd.Series([f_color, l_color, h_count])
 
         m_df[['f_c', 'l_c', 'cnt']] = m_df.apply(get_map_logic, axis=1)
@@ -149,7 +154,7 @@ if active_menu == "Műszerfal & Térkép":
         ))
 
 # -----------------------------
-# 2. VEZÉNYLÉS (FELADAT ALAPÚ)
+# 2. VEZÉNYLÉS
 # -----------------------------
 elif active_menu == "Vezénylés":
     row_id = st.session_state.edit_row_id
@@ -158,7 +163,6 @@ elif active_menu == "Vezénylés":
     any_station = st.sidebar.checkbox("Nem aktív hiba küldés")
     
     with st.form("v_form"):
-        # Ha konkrét sorból jövünk (📝 gomb)
         if row_id:
             row_data = data['naplo'][data['naplo']['_sheet_row'] == row_id].iloc[0]
             default_allomas = row_data[COL_A]
@@ -170,7 +174,6 @@ elif active_menu == "Vezénylés":
                 all_list = data['allomasok']['Nev'].tolist()
                 task_list = ["Általános karbantartás / Ellenőrzés"]
             else:
-                # Minden aktív hiba külön sorban jelenik meg!
                 task_options = {get_task_label(r): r for _, r in hibas_df.iterrows()}
                 task_list = list(task_options.keys())
 
@@ -178,12 +181,12 @@ elif active_menu == "Vezénylés":
         
         t_tech = st.selectbox("Technikus", techs)
         selected_task_label = st.selectbox("Választható feladatok (Aktív hibák)", task_list)
-        t_date = st.date_input("Dátum", date.today())
+        # Itt módosítva: Dátum helyett Hiba határideje
+        t_date = st.date_input("Hiba határideje", date.today())
         t_time = st.time_input("Időpont", time(8, 0))
         
         c1, c2 = st.columns(2)
         if c1.form_submit_button("Ütemezés mentése"):
-            # Adatok kinyerése
             if not any_station and not row_id:
                 sel_row = task_options[selected_task_label]
                 final_allomas = sel_row[COL_A]
@@ -192,10 +195,10 @@ elif active_menu == "Vezénylés":
                 final_allomas = default_allomas
                 final_feladat = default_feladat
             else:
-                final_allomas = st.selectbox("Helyszín", all_list) # Csak ha 'any_station'
+                final_allomas = all_list[0] 
                 final_feladat = "Általános ellenőrzés"
 
-            # Régi ütemezés törlése (ha van)
+            # Régi ütemezés törlése
             cells = sheet_vez.findall(final_allomas)
             for cell in reversed(cells):
                 if sheet_vez.cell(cell.row, 4).value == final_feladat:
@@ -218,20 +221,18 @@ elif active_menu == "Hiba rögzítése":
     with st.form("h_form"):
         opts = {f"{r['Nev']} ({r['Tipus']})": r['Nev'] for _, r in data['allomasok'].iterrows()}
         val_all = st.selectbox("Állomás", list(opts.keys()))
-        val_ticket = st.text_input("Hibajegyszám (opcionális)", placeholder="PL: #12345")
+        val_ticket = st.text_input("Hibajegyszám (opcionális)")
         desc = st.text_area("Hiba leírása")
         d = st.date_input("Dátum", date.today())
         t = st.time_input("Idő", time(12, 0))
-        
         if st.form_submit_button("Mentés"):
-            # Dátum, Állomás, Hiba, Státusz, Hibajegy
             sheet_naplo.append_row([f"{d} {t.strftime('%H:%M')}", opts[val_all], desc, "Nyitott", val_ticket])
             st.success("Hiba rögzítve!"); st.rerun()
 
 # -----------------------------
-# 4. ÚJ ÁLLOMÁS
+# 4. ÚJ ÁLLOMÁS FELVITELE
 # -----------------------------
-elif active_menu == "Új állomás":
+elif active_menu == "Új állomás felvitele":
     st.title("➕ Új állomás rögzítése")
     with st.form("a_form"):
         n = st.text_input("Név"); t = st.selectbox("Típus", ["MOL", "ORLEN", "Egyéb"])
