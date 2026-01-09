@@ -1,101 +1,167 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import date
 import folium
 from streamlit_folium import st_folium
-from datetime import datetime
 
-# ================== KONFIG ==================
-st.set_page_config(layout="wide", page_title="Karbantartási Vezénylő")
-
+# ======================
+# GOOGLE AUTH
+# ======================
 SCOPE = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-# ================== GOOGLE SHEETS ==================
-@st.cache_resource
-def get_spreadsheet():
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=SCOPE
-    )
-    gc = gspread.authorize(creds)
-    return gc.open("Terkep_Adatbazis")
+creds = Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"],
+    scopes=SCOPE
+)
 
-@st.cache_data(ttl=60)
+gc = gspread.authorize(creds)
+
+# ======================
+# SHEETEK
+# ======================
+SPREADSHEET_NAME = "Terkep_Adatbazis"
+
+sh = gc.open(SPREADSHEET_NAME)
+sheet_allomasok = sh.worksheet("Allomasok")
+sheet_naplo = sh.worksheet("Naplo")
+sheet_tech = sh.worksheet("Technikusok")
+sheet_vez = sh.worksheet("Vezenylesek")
+
+# ======================
+# ADATBETÖLTÉS
+# ======================
 def load_data():
-    sh = get_spreadsheet()
-    return {
-        "allomas": sh.worksheet("Allomasok").get_all_records(),
-        "naplo": sh.worksheet("Naplo").get_all_records(),
-        "technikus": sh.worksheet("Technikusok").get_all_records(),
-        "vezeny": sh.worksheet("Vezenylesek").get_all_records()
-    }
+    return (
+        sheet_allomasok.get_all_records(),
+        sheet_naplo.get_all_records(),
+        sheet_tech.get_all_records(),
+        sheet_vez.get_all_records()
+    )
 
-def run_and_refresh(func, *args):
-    func(*args)
-    st.cache_data.clear()
-    st.rerun()
+allomasok, naplo, technikusok, vezenylesek = load_data()
 
-# ================== ADATBETÖLTÉS ==================
-try:
-    data = load_data()
-    allomasok = data["allomas"]
-    naplo = data["naplo"]
-    technikusok = data["technikus"]
-except Exception as e:
-    st.error(f"❌ Adatbetöltési hiba: {e}")
-    st.stop()
+# ======================
+# UI – CÍM
+# ======================
+st.set_page_config(layout="wide")
+st.title("🗺️ Karbantartási vezénylő – Streamlit")
 
-# ================== SIDEBAR ==================
-st.sidebar.title("⚙️ Kezelőpanel")
+# ======================
+# ÚJ ÁLLOMÁS
+# ======================
+with st.expander("➕ Új állomás rögzítése"):
+    nev = st.text_input("Állomás neve")
+    tipus = st.selectbox("Típus", ["MOL", "Egyéb"])
+    lat = st.text_input("Szélesség (pl. 47.650587)")
+    lon = st.text_input("Hosszúság (pl. 19.725236)")
 
-with st.sidebar.expander("➕ Új állomás felvétele"):
-    with st.form("uj_allomas"):
-        nev = st.text_input("Állomás neve")
-        tipus = st.selectbox("Típus", ["MOL", "ORLEN", "Egyéb"])
-        lat = st.text_input("Szélesség (pl. 47.650587)")
-        lon = st.text_input("Hosszúság (pl. 19.725236)")
+    if st.button("Állomás mentése"):
+        try:
+            sheet_allomasok.append_row([
+                "",
+                nev,
+                tipus,
+                float(lat.replace(",", ".")),
+                float(lon.replace(",", "."))
+            ])
+            st.success("Állomás mentve")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Hiba: {e}")
 
-        if st.form_submit_button("Mentés"):
-            try:
-                lat = float(lat.replace(",", "."))
-                lon = float(lon.replace(",", "."))
-                run_and_refresh(
-                    get_spreadsheet().worksheet("Allomasok").append_row,
-                    [nev, lat, lon, tipus]
-                )
-                st.success("✅ Állomás mentve")
-            except Exception as e:
-                st.error(f"Hibás koordináta: {e}")
+# ======================
+# ÚJ HIBA
+# ======================
+with st.expander("📝 Új hiba rögzítése"):
+    allomas_nevek = [a["Nev"] for a in allomasok]
 
-# ================== TÉRKÉP ==================
-st.header("🗺️ Állomások térképe")
+    h_allomas = st.selectbox("Állomás", allomas_nevek)
+    h_datum = st.date_input("Dátum", date.today())
+    h_leiras = st.text_input("Hiba leírása")
 
-m = folium.Map(location=[47.5, 19.0], zoom_start=7)
+    if st.button("Hiba mentése"):
+        sheet_naplo.append_row([
+            str(h_datum),
+            h_allomas,
+            h_leiras,
+            "NYITOTT",
+            ""
+        ])
+        st.success("Hiba rögzítve")
+        st.rerun()
 
-for a in allomasok:
+# ======================
+# VEZÉNYLÉS
+# ======================
+with st.expander("👷 Technikus vezénylés"):
+    tech_nevek = [t["Név"] for t in technikusok]
+
+    nyitott_hibak = [
+        f"{n['Állomás neve:']} – {n['Hiba leírása']} ({n['Dátum']})"
+        for n in naplo if n["Státusz"] == "NYITOTT"
+    ]
+
+    v_tech = st.selectbox("Technikus", tech_nevek)
+    v_hiba = st.selectbox("Hiba", nyitott_hibak)
+    v_datum = st.date_input("Ütemezett dátum", date.today())
+
+    if st.button("Vezénylés mentése"):
+        allomas_nev = v_hiba.split(" – ")[0]
+
+        sheet_vez.append_row([
+            v_tech,
+            allomas_nev,
+            str(v_datum),
+            v_hiba
+        ])
+
+        # Napló frissítés
+        for i, row in enumerate(naplo):
+            hiba_id = f"{row['Állomás neve:']} – {row['Hiba leírása']} ({row['Dátum']})"
+            if hiba_id == v_hiba:
+                sheet_naplo.update_cell(i + 2, 4, "BEOSZTVA")
+                sheet_naplo.update_cell(i + 2, 5, v_tech)
+
+        st.success("Vezénylés rögzítve")
+        st.rerun()
+
+# ======================
+# TÉRKÉP
+# ======================
+st.subheader("🗺️ Aktív hibák térképen")
+
+m = folium.Map(location=[47.2, 19.4], zoom_start=7)
+
+for n in naplo:
+    allomas = next(
+        (a for a in allomasok if a["Nev"] == n["Állomás neve:"]),
+        None
+    )
+
+    if not allomas:
+        continue
+
     try:
-        nev = a.get("Állomás neve") or a.get("Allomas neve") or "Ismeretlen"
-        lat = float(str(a.get("Szélesség", "")).replace(",", "."))
-        lon = float(str(a.get("Hosszúság", "")).replace(",", "."))
-
-        folium.Marker(
-            [lat, lon],
-            popup=nev,
-            icon=folium.Icon(color="blue", icon="info-sign")
-        ).add_to(m)
+        lat = float(allomas["Lat"])
+        lon = float(allomas["Lon"])
     except:
         continue
 
-st_folium(m, width=1200, height=600)
+    szin = "green" if n["Státusz"] == "BEOSZTVA" else "red"
 
-# ================== HIBÁK NAPLÓ ==================
-st.header("📒 Hibák napló")
+    folium.Marker(
+        [lat, lon],
+        popup=f"""
+        <b>{n['Állomás neve:']}</b><br>
+        {n['Hiba leírása']}<br>
+        Státusz: {n['Státusz']}<br>
+        Technikus: {n['Technikus']}
+        """,
+        icon=folium.Icon(color=szin, icon="wrench", prefix="fa")
+    ).add_to(m)
 
-if naplo:
-    st.dataframe(naplo, use_container_width=True)
-else:
-    st.info("Nincs hiba rögzítve")
-
+st_folium(m, height=500)
