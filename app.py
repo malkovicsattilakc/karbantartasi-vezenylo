@@ -40,22 +40,33 @@ def load_all_data():
 
 data = load_all_data()
 
-# DINAMIKUS OSZLOPKERESÉS
-def find_col(df, target):
+# INTELLIGENS OSZLOPKERESŐ FÜGGVÉNY
+def find_col(df, targets):
     if df.empty: return "Ismeretlen"
-    for c in df.columns:
-        if target.lower() in c.lower(): return c
-    return target
+    # Megpróbáljuk megtalálni a megadott kulcsszavak bármelyikét az oszlopnevekben
+    for target in targets:
+        for c in df.columns:
+            if target.lower() in str(c).lower():
+                return c
+    return df.columns[0] # Ha semmi nincs, az első oszlopot adja vissza, hogy ne omoljon össze
 
-COL_A = find_col(data['naplo'], "Állomás")
-COL_S = find_col(data['naplo'], "Státusz")
-COL_T = find_col(data['naplo'], "Hibajegyszám")
+# OSZLOPNEVEK DINAMIKUS MEGHATÁROZÁSA
+COL_A = find_col(data['naplo'], ["Állomás", "Allomas", "Helyszín"])
+COL_S = find_col(data['naplo'], ["Státusz", "Status"])
+COL_T = find_col(data['naplo'], ["Hibajegyszám", "Ticket", "Jegy"])
+COL_DESC = find_col(data['naplo'], ["Hiba leírása", "Leírás", "Hiba"])
 
+# Vezénylés lap oszlopai
+COL_V_ALL = find_col(data['vez'], ["Allomas", "Állomás", "Helyszín"])
+COL_V_FEL = find_col(data['vez'], ["Feladat", "Hiba", "Leírás", "Munkatípus"])
+COL_V_TECH = find_col(data['vez'], ["Technikus", "Név", "Személy"])
+
+# Aktív hibák szűrése
 hibas_df = data['naplo'][data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni'])].copy() if not data['naplo'].empty else pd.DataFrame()
 
 def get_task_label(row):
     ticket = f"[{row[COL_T]}] " if COL_T in row and str(row[COL_T]).strip() else ""
-    return f"{row[COL_A]} | {ticket}{row['Hiba leírása']}"
+    return f"{row[COL_A]} | {ticket}{row[COL_DESC]}"
 
 # -----------------------------
 # MENÜ ÉS LOGIKA
@@ -90,31 +101,26 @@ if active_menu == "Műszerfal & Térkép":
                         ticket_prefix = f"**{row[COL_T]}** - " if COL_T in row and row[COL_T] else ""
                         
                         with st.container(border=True):
-                            st.write(f"⏰ {row['Dátum'].split(' ')[1] if ' ' in str(row['Dátum']) else row['Dátum']}")
+                            st.write(f"⏰ {str(row['Dátum']).split(' ')[1] if ' ' in str(row['Dátum']) else ''}")
                             st.markdown(f"📍 **{row[COL_A]}**")
-                            st.write(f"{ticket_prefix}{row['Hiba leírása']}")
+                            st.write(f"{ticket_prefix}{row[COL_DESC]}")
                             
-                            # Ütemezés ellenőrzése
-                            v_info = data['vez'][(data['vez']['Allomas_Neve'] == row[COL_A]) & 
-                                                 (data['vez']['Feladat'] == row['Hiba leírása'])] if not data['vez'].empty else pd.DataFrame()
+                            # Ütemezés keresése a dinamikus oszlopnevekkel
+                            v_info = data['vez'][(data['vez'][COL_V_ALL] == row[COL_A]) & 
+                                                 (data['vez'][COL_V_FEL] == row[COL_DESC])] if not data['vez'].empty else pd.DataFrame()
                             
                             if not v_info.empty:
                                 lv = v_info.iloc[-1]
-                                st.success(f"👤 {lv['Technikus_Neve']}\n📅 {lv['Datum']}")
-                                btn_label, btn_help = "📝", "Ütemezés módosítása"
+                                st.success(f"👤 {lv[COL_V_TECH]}\n📅 {lv['Datum']}")
+                                btn_label, btn_help = "📝", "Módosítás"
                             else:
                                 st.warning("❌ Nincs ütemezve")
-                                btn_label, btn_help = "📅", "Új ütemezés leadása"
+                                btn_label, btn_help = "📅", "Új ütemezés"
                             
-                            # Gombok
                             b1, b2, b3 = st.columns(3)
                             
                             if b1.button("✅", key=f"ok_{row['_sheet_row']}", help="Kész"):
                                 sheet_naplo.update_cell(row['_sheet_row'], 4, "Kész")
-                                cells = sheet_vez.findall(row[COL_A])
-                                for cell in reversed(cells):
-                                    if sheet_vez.cell(cell.row, 4).value == row['Hiba leírása']:
-                                        sheet_vez.delete_rows(cell.row)
                                 st.rerun()
 
                             if b2.button(btn_label, key=f"ed_{row['_sheet_row']}", help=btn_help):
@@ -140,7 +146,7 @@ if active_menu == "Műszerfal & Térkép":
             if h_count == 0: return pd.Series([[200, 200, 200, 30], [100, 100, 100], 0])
             brand = str(r.get('Tipus', '')).upper()
             l_color = [0, 255, 0] if "MOL" in brand else ([255, 0, 0] if "ORLEN" in brand else [0, 191, 255])
-            v_all = data['vez'][data['vez']['Allomas_Neve'] == r['Nev']] if not data['vez'].empty else pd.DataFrame()
+            v_all = data['vez'][data['vez'][COL_V_ALL] == r['Nev']] if not data['vez'].empty else pd.DataFrame()
             is_scheduled = not v_all.empty
             has_return = any(h_list[COL_S] == "Visszamenni")
             if has_return and not is_scheduled: f_color = [139, 69, 19, 230]
@@ -166,52 +172,41 @@ elif active_menu == "Vezénylés":
     row_id = st.session_state.edit_row_id
     st.title("📋 " + ("Ütemezés módosítása" if row_id else "Új vezénylés"))
     
-    any_station = st.sidebar.checkbox("Nem aktív hiba küldés")
-    
     with st.form("v_form"):
         if row_id:
             row_data = data['naplo'][data['naplo']['_sheet_row'] == row_id].iloc[0]
             default_allomas = row_data[COL_A]
-            default_feladat = row_data['Hiba leírása']
-            all_list = [default_allomas]
+            default_feladat = row_data[COL_DESC]
             task_list = [get_task_label(row_data)]
         else:
-            if any_station:
-                all_list = data['allomasok']['Nev'].tolist()
-                task_list = ["Általános karbantartás / Ellenőrzés"]
-            else:
-                task_options = {get_task_label(r): r for _, r in hibas_df.iterrows()}
-                task_list = list(task_options.keys())
+            task_options = {get_task_label(r): r for _, r in hibas_df.iterrows()}
+            task_list = list(task_options.keys())
 
         techs = data['tech']['Név'].tolist() if not data['tech'].empty else ["Nincs technikus"]
-        
         t_tech = st.selectbox("Technikus", techs)
-        selected_task_label = st.selectbox("Választható feladatok (Aktív hibák)", task_list)
+        selected_task_label = st.selectbox("Választható feladat", task_list)
         t_date = st.date_input("Hiba határideje", date.today())
         t_time = st.time_input("Időpont", time(8, 0))
         
         c1, c2 = st.columns(2)
-        if c1.form_submit_button("Ütemezés mentése"):
-            if not any_station and not row_id:
-                sel_row = task_options[selected_task_label]
-                final_allomas = sel_row[COL_A]
-                final_feladat = sel_row['Hiba leírása']
-            elif row_id:
-                final_allomas = default_allomas
-                final_feladat = default_feladat
+        if c1.form_submit_button("Mentés"):
+            if row_id:
+                final_allomas, final_feladat = default_allomas, default_feladat
             else:
-                final_allomas = all_list[0] if all_list else "Ismeretlen"
-                final_feladat = "Általános ellenőrzés"
+                sel_row = task_options[selected_task_label]
+                final_allomas, final_feladat = sel_row[COL_A], sel_row[COL_DESC]
 
-            # Törlés ütemezésről
-            cells = sheet_vez.findall(final_allomas)
-            for cell in reversed(cells):
-                if sheet_vez.cell(cell.row, 4).value == final_feladat:
-                    sheet_vez.delete_rows(cell.row)
+            # Régi bejegyzés törlése a biztonság kedvéért
+            try:
+                cells = sheet_vez.findall(final_allomas)
+                for cell in reversed(cells):
+                    if sheet_vez.cell(cell.row, list(data['vez'].columns).index(COL_V_FEL)+1).value == final_feladat:
+                        sheet_vez.delete_rows(cell.row)
+            except: pass
             
             sheet_vez.append_row([t_tech, final_allomas, f"{t_date} {t_time.strftime('%H:%M')}", final_feladat])
             st.session_state.edit_row_id = None
-            st.success("Sikeresen ütemezve!"); st.rerun()
+            st.success("Sikeres ütemezés!"); st.rerun()
             
         if row_id and c2.form_submit_button("Ütemezés törlése"):
             st.session_state.edit_row_id = None; st.rerun()
