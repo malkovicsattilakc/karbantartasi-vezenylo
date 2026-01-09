@@ -58,7 +58,6 @@ COL_S = get_col(data['naplo'], 'Státusz', "Státusz")
 # Aktív hibák kigyűjtése a szűréshez
 if not data['naplo'].empty and COL_S in data['naplo'].columns:
     hibas_df_all = data['naplo'][data['naplo'][COL_S].isin(['Nyitott', 'Visszamenni'])].copy()
-    # Azon állomások listája, ahol aktív hiba van
     aktiv_hibas_allomasok = hibas_df_all[COL_A].unique().tolist()
 else:
     hibas_df_all = pd.DataFrame()
@@ -80,7 +79,6 @@ if active_menu == "Műszerfal & Térkép":
     st.title("🛠️ Feladatkezelő és Műszerfal")
     
     if not hibas_df_all.empty:
-        # Időrendi rendezés
         hibas_df_all['dt_temp'] = pd.to_datetime(hibas_df_all['Dátum'], errors='coerce')
         hibas_df_sorted = hibas_df_all.sort_values('dt_temp', ascending=True)
     else:
@@ -118,8 +116,7 @@ if active_menu == "Műszerfal & Térkép":
             if is_sched and b[2].button("📝", key=f"e_{s_row}"):
                 st.session_state.edit_target = all_name; st.rerun()
             if b[3].button("🗑️", key=f"t_{s_row}"):
-                sheet_naplo.delete_rows(s_row)
-                st.rerun()
+                sheet_naplo.delete_rows(s_row); st.rerun()
     else:
         st.info("Nincs rögzített aktív feladat.")
 
@@ -143,17 +140,26 @@ if active_menu == "Műszerfal & Térkép":
             ))
 
 # -----------------------------
-# 2. HIBA RÖGZÍTÉSE
+# 2. HIBA RÖGZÍTÉSE (Állomás + Típus megjelenítéssel)
 # -----------------------------
 elif active_menu == "Hiba rögzítése":
     st.title("🐞 Új hiba és határidő")
     with st.form("h_form"):
-        a_names = data['allomasok']['Nev'].tolist() if not data['allomasok'].empty else []
-        sel_all = st.selectbox("Állomás", a_names)
+        # Állomás választó: Név + Típus (C oszlop) megjelenítése
+        if not data['allomasok'].empty:
+            # Szótár: Megjelenített név -> Eredeti név
+            options = {f"{r['Nev']} - {r['Tipus']}": r['Nev'] for _, r in data['allomasok'].iterrows()}
+            display_name = st.selectbox("Állomás kiválasztása", list(options.keys()))
+            sel_all = options[display_name] # Itt kapjuk meg az eredeti nevet a mentéshez
+        else:
+            sel_all = None
+            st.warning("Nincs felvitt állomás.")
+
         desc = st.text_area("Hiba leírása")
         col1, col2 = st.columns(2)
         d = col1.date_input("Határidő napja", date.today())
         t = col2.time_input("Pontos idő", time(10, 0))
+        
         if st.form_submit_button("Mentés"):
             if sel_all and desc:
                 full_dt = f"{d} {t.strftime('%H:%M')}"
@@ -162,40 +168,33 @@ elif active_menu == "Hiba rögzítése":
             else: st.error("Tölts ki minden mezőt!")
 
 # -----------------------------
-# 3. VEZÉNYLÉS (SZŰRT LISTÁVAL)
+# 3. VEZÉNYLÉS
 # -----------------------------
 elif active_menu == "Vezénylés":
     target = st.session_state.edit_target
     st.title("📋 " + ("Ütemezés módosítása" if target else "Technikus kirendelése"))
     
-    # Ha nincs aktív hiba, figyelmeztetünk
     if not aktiv_hibas_allomasok and not target:
-        st.warning("Nincs olyan állomás, ahol aktív hiba lenne, ezért nem lehet vezényelni. Rögzíts előbb egy hibát!")
+        st.warning("Nincs aktív hibás állomás.")
     else:
         with st.form("v_form"):
             techs = data['tech']['Név'].tolist() if not data['tech'].empty else []
-            
-            # CSAK AZ AKTÍV HIBÁS ÁLLOMÁSOK MEGJELENÍTÉSE
-            # Ha módosítás van, akkor a módosítandót is hozzáadjuk, ha véletlenül nem lenne benne
-            if target and target not in aktiv_hibas_allomasok:
-                display_alls = [target] + aktiv_hibas_allomasok
-            else:
-                display_alls = aktiv_hibas_allomasok
+            display_alls = [target] + [a for a in aktiv_hibas_allomasok if a != target] if target else aktiv_hibas_allomasok
             
             t_tech = st.selectbox("Technikus", techs)
-            t_all = st.selectbox("Helyszín (Csak aktív hibák!)", display_alls, index=display_alls.index(target) if target in display_alls else 0)
+            t_all = st.selectbox("Helyszín (Csak aktív!)", display_alls)
             t_date = st.date_input("Dátum", date.today())
             t_time = st.time_input("Időpont", time(8, 0))
             
             if st.form_submit_button("Mentés"):
-                if target: # Régi ütemezés törlése
+                if target:
                     try:
                         cells = sheet_vez.findall(target)
                         for cell in reversed(cells): sheet_vez.delete_rows(cell.row)
                     except: pass
                 sheet_vez.append_row([t_tech, t_all, f"{t_date} {t_time.strftime('%H:%M')}", "Ütemezve"])
                 st.session_state.edit_target = None
-                st.success("Sikeres vezénylés!"); st.rerun()
+                st.success("Sikeres mentés!"); st.rerun()
 
     if target and st.button("Mégse"):
         st.session_state.edit_target = None; st.rerun()
@@ -207,7 +206,7 @@ elif active_menu == "Új állomás felvitele":
     st.title("➕ Új állomás rögzítése")
     with st.form("a_form"):
         n = st.text_input("Név"); t = st.selectbox("Típus", ["MOL", "ORLEN", "Egyéb"])
-        la = st.text_input("Lat (pl. 47.12)"); lo = st.text_input("Lon (pl. 19.12)")
+        la = st.text_input("Lat"); lo = st.text_input("Lon")
         if st.form_submit_button("Mentés"):
             if n and la and lo:
                 sheet_allomasok.append_row([len(data['allomasok'])+1, n, t, la, lo])
